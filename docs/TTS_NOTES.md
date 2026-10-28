@@ -1,13 +1,21 @@
 # TTS for the rebuilt Muse gadget (Waveshare ESP32-S3-Touch-AMOLED-1.43C)
 
-## Status: Edge TTS BUILT 2026-10-26 — awaiting OTA/flash + hardware test
+## Status: tts5 source candidate (2026-10-27) — build and hardware test pending
+
+The current repository source adds the 256×256 Studio Panda, render-grid
+independent caption layouts, and an Edge `Date`-header fallback when SNTP
+cannot synchronize. Its focused host checks and rendered animations pass,
+but this exact source has **not** been built with ESP-IDF v6.0.1, packaged,
+flashed or exercised on the physical board. The tts1 through tts4 binaries
+and hashes below are historical and do not contain these latest changes.
+
+## Historical tts1 build (2026-10-26)
 
 Edge TTS is implemented, built, and verified on the host (see below). The
 previous "blocked" status is SUPERSEDED: edge-tts 7.3.1's released v2
 generator was ported to C and verified byte-for-byte against the Python
-reference, and the firmware now syncs wall-clock time via SNTP. No code
-was flashed or OTA'd from this VM — the board still runs the non-TTS
-build until the user applies one of the images below.
+reference, and the firmware syncs wall-clock time via SNTP. This first
+package was not flashed or OTA'd from the build VM.
 
 Deliverables (in this directory; the known-good non-TTS
 `muse-1.43c-merged.bin` was NOT overwritten — its SHA-256 still matches
@@ -71,14 +79,16 @@ exit 0):
   **HTTP 101 Switching Protocols** (a bad token gives 403), and real
   MP3 audio flowed back (see "live capture" below).
 
-### 2. Wall-clock time: SNTP added
+### 2. Wall-clock time: SNTP plus Edge Date recovery
 
 - `muse_edge_tts.c` starts SNTP once (`esp_netif_sntp_init` with the
   default `pool.ntp.org` server) and waits up to 12 s for sync on first
-  TTS use, only when the clock is not already valid. If sync fails or
-  times out, the message falls back to text-only — replies are never
-  blocked waiting for time. No `sdkconfig` change was needed (SNTP/LWIP
-  options and the certificate bundle were already enabled).
+  TTS use, only when the clock is not already valid. In the tts5 source,
+  a timeout no longer stops there: the client makes the Edge handshake
+  with the stale token, reads the authenticated server `Date` from the
+  expected 403 response, derives clock skew and retries once. If that
+  also fails, the message falls back to text-only. No `sdkconfig` change
+  is needed (SNTP/LWIP options and the certificate bundle are enabled).
 
 ## Edge protocol implemented (edge-tts 7.3.1, verified against a live capture)
 
@@ -177,11 +187,12 @@ mechanics, now wired):
   (`s_turn.silent = true`,
   `m.pcm_frames = m.len * MIC_RATE / TEXT_CHARS_PER_S`); if partial
   audio arrived, it sets `s_turn.mp3_ended` so `decode()` drains what
-  is there. If `muse_edge_tts_start()` itself fails (no clock, no
-  memory, task spawn failed) or the text is missing/empty, `start_tts()`
-  takes the silent path immediately. Serial log lines are tagged
-  `muse_edge_tts` with `edge_tts: ...` messages; a fetch failure logs
-  `edge_tts: fetch failed` / `edge_tts: no audio` style lines.
+  is there. If `muse_edge_tts_start()` itself fails (no memory or task
+  spawn failure) or the text is missing/empty, `start_tts()` takes the
+  silent path immediately. A missing SNTP clock is handled inside the
+  fetch task through the Edge `Date` retry described above. Serial lines
+  are tagged `muse_edge_tts` with `edge_tts: ...` messages; a fetch
+  failure logs `edge_tts: fetch failed` / `edge_tts: no audio` style lines.
 
 ## Token baking: NOT possible, and NOT needed
 
@@ -765,3 +776,64 @@ face, black ears and eye patches) instead of the old character.
 Because this image also carries the tts3 voice fix, the same flash
 covers both: speak to the board and check for Edge (Xiaoxiao)
 voice alongside the screen text, per the tts3 live steps.
+
+## tts5 source candidate — Studio Panda HD + resilient Edge clock (2026-10-27)
+
+This repository revision supersedes tts4 **as source only**. It deliberately
+does not publish a new app or merged binary until the ESP-IDF and physical
+audio gates below pass.
+
+### Edge clock fallback
+
+- SNTP remains the preferred clock source.
+- If SNTP times out, the fetch no longer exits before network access. It
+  attempts the Edge handshake with the stale token, parses the server `Date`
+  from the expected HTTP 403, computes `server - local` skew and retries once.
+- `tests/test_overlay.py` extracts the production retry orchestration and
+  verifies no-clock first attempt, 403 retry, successful audio and terminal
+  failure paths. It also compiles the production DRM implementation and checks
+  the edge-tts 7.3.1 golden token.
+- A live host request on 2026-10-27 produced 33,840 bytes of
+  `audio-24khz-48kbitrate-mono-mp3` with Xiaoxiao; this verifies the public
+  service and voice from the host, not the board's LAN or speaker.
+
+### Studio Panda HD
+
+- `avatar/muse_pixel.c` is replaced with a clean large-head, compact-body
+  panda. BOOT, IDLE, LISTENING, THINKING, SPEAKING, ERROR, OFF and happy
+  retain distinct expressions and motion.
+- The render grid is 256×256 while the screen canvas remains 320 px. Curves
+  are rasterized at the higher resolution rather than smoothing a 128×128
+  bitmap.
+- The frame buffer is 64 KB in PSRAM. `muse_ui.c`'s dirty-cell cache grows to
+  128 KB in PSRAM and still falls back to full redraw if allocation fails.
+- Heard and read reply layouts remain fixed at 256 and 128 screen px. Canvas
+  clamps no longer round by render-grid width, which would produce zero-sized
+  avatars on displays narrower than 256 px.
+- `tools/muse/anim.c` and `preview.c` now render the real 320 px canvas.
+
+### Verification completed
+
+- `python3 -m unittest discover -s tests -p 'test_*.py'`: 3 focused tests,
+  including ASan/UBSan rendering of every pose, pass.
+- The complete upstream host suite after applying this overlay:
+  629 tests pass, with 3 environment-dependent tests skipped.
+- Host animation generation completed for all eight states. Desktop and
+  mobile visual review found no clipped panda features, hearts, alerts or
+  caption overlap.
+- The 256×256 renderer's host preview rendered roughly 300 frames in 0.12 s.
+  This is a host regression signal only, not an ESP32-S3 frame-time claim.
+
+### Required before a binary is published
+
+1. Overlay this source on muse-gadget-sdk `c9354b7` and build the
+   `waveshare-s3-143c` profile with ESP-IDF v6.0.1.
+2. Confirm the signed app still fits the `0x3E0000` OTA slot and inspect the
+   map for the 64 KB avatar frame plus 128 KB dirty-cell cache in PSRAM.
+3. Flash app-only after clearing `otadata`, preserving NVS.
+4. Confirm `>speaker=1`, `>volume=80`, the raw `m` MP3 self-test, then one
+   live Xiaoxiao reply with captions and audible speaker output.
+5. Capture `edge_tts:` serial lines and the complete boot/reply sequence.
+
+The tts4 hashes above identify only the historical 128×128 build. They must
+not be used to claim or distribute tts5.

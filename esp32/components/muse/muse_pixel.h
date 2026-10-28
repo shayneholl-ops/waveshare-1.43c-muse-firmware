@@ -25,22 +25,19 @@
  * Procedural pixel-art renderer for the Muse character.
  *
  * Muse is drawn on a MUSE_PX_W x MUSE_PX_H grid with a small palette,
- * ordered dithering and hard outlines, then blown up to the screen with
- * nearest-neighbour blocks so the pixels stay chunky. The grid used to be
- * 64x64 (5 screen px per cell on the 320 px canvas); it is now 128x128,
- * so the same on-screen avatar renders with visibly finer detail
- * (2.5 screen px per cell). The on-screen canvas size is deliberately
- * NOT tied to the grid: see MUSE_CANVAS_PX.
+ * ordered dithering and hard outlines, then scaled to the screen. The grid
+ * progressed from 64x64 to 128x128 and is now 256x256, giving curves and
+ * facial details 1.25 screen pixels per cell on the 320 px avatar canvas.
+ * The on-screen size remains deliberately independent of render resolution:
+ * see MUSE_CANVAS_PX.
  */
 
-#define MUSE_PX_W 128
-#define MUSE_PX_H 128
+#define MUSE_PX_W 256
+#define MUSE_PX_H 256
 
 /* On-screen size of the avatar canvas, in screen pixels. This is a
- * display-layout constant, independent of the render grid: the grid got
- * finer (64 -> 128) without making Muse bigger on screen. Previously this
- * was written as MUSE_PX_W * 5, which only equalled 320 while the grid
- * was 64 wide. */
+ * display-layout constant, independent of the render grid: increasing the
+ * grid from 128 to 256 adds detail without making Muse bigger on screen. */
 #define MUSE_CANVAS_PX 320
 
 typedef struct {

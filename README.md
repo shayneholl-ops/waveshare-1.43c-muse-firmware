@@ -3,8 +3,9 @@
 A port of the public [muse-gadget-sdk](https://github.com/facebookincubator/muse-gadget-sdk)
 (base commit `c9354b7`, ESP-IDF v6.0.1 only) for the Waveshare
 ESP32-S3-Touch-AMOLED-1.43C board, with a panda avatar and Edge +
-ElevenLabs text-to-speech. Published for community review — see
-[Help wanted: voice output](#help-wanted-voice-output) below.
+ElevenLabs text-to-speech. The current source has a 256×256 Studio Panda
+renderer and a resilient Edge clock fallback; an ESP-IDF build and physical
+audio check are still required before flashing it.
 
 ## Hardware
 
@@ -43,18 +44,22 @@ SDK at the base commit above. `docs/` holds the design notes.
 **Modified upstream files:**
 
 - `esp32/avatar/muse_pixel.c`, `esp32/components/muse/muse_pixel.h` —
-  panda avatar: procedural, grid 64×64 → 128×128, same 320 px on-screen
-  size, frame+mask buffers in PSRAM; all poses preserved
-- `esp32/components/muse/muse_ui.c` — layout decoupled from the avatar grid
+  Studio Panda avatar: procedural 256×256 render grid, same 320 px
+  on-screen size, 64 KB frame buffer in PSRAM; all eight poses preserved
+- `esp32/components/muse/muse_ui.c` — avatar and reply layouts use fixed
+  screen sizes independent of render-grid resolution
 - `esp32/components/muse/muse_chat_session.cpp` — TTS routing hooks
 - `esp32/components/muse/boards/muse_lcd_bands.c` — `wait_band` freeze fix
 - `esp32/components/muse/{CMakeLists.txt,Kconfig,idf_component.yml}` —
   board wiring (choice, sources, SH8601 rule)
 - `esp32/main/muse_glue.c`, `esp32/tools/board.sh` — glue + build shortcut
+- `esp32/tools/muse/{anim.c,preview.c}` — host previews rendered at the
+  real 320 px avatar canvas rather than a grid-derived size
 
 `docs/BUILD_NOTES.md` is the original design note; a few of its TODOs
 (gap 8, CST820 sleep, touch clamp) are already resolved in the as-built
-board file. `docs/TTS_NOTES.md` is the full tts2/tts3/tts4 build record.
+board file. `docs/TTS_NOTES.md` preserves the tts2/tts3/tts4 build record
+and describes the newer, unbuilt tts5 source candidate.
 `docs/WUPSBR_COMPARISON.md` compares this port against the community
 wupsbr port (reference only — not flashed wholesale).
 
@@ -75,6 +80,15 @@ idf.py -B build-waveshare-s3-143c -DIDF_TARGET=esp32s3 \
   -DSDKCONFIG=build-waveshare-s3-143c/sdkconfig \
   -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;devices/sdkconfig.muse;devices/sdkconfig.muse-waveshare-s3-143c" \
   -p /dev/cu.usbmodem1101 flash monitor
+```
+
+## Host checks
+
+The overlay has dependency-free host checks for the Edge token and retry
+orchestration, plus sanitizer-backed rendering of all panda states:
+
+```bash
+python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
 ## Flash an app-only image (USB)
@@ -106,41 +120,39 @@ No token, key, SSID, or password appears anywhere in this repo — that is
 deliberate and grep-verified. Tokens and keys go through the owner's own
 serial console into board NVS only.
 
-## Help wanted: voice output
+## Hardware validation still needed
 
-**Symptom:** replies render as on-screen text but produce no sound, on
-a confirmed current build (the panda avatar on the main tile proves the
-new firmware is running).
+The previously flashed tts4 build displayed replies but produced no sound.
+The current source has not yet been built or flashed, so the following
+changes are host-verified only.
 
-**Ruled out:**
+**Addressed in current source:**
 
 - Internal-heap exhaustion: the Edge stream buffer (32 KB) and fetch-task
   stack were moved to PSRAM in tts3; the board's free internal heap
-  during a reply was only ~27 KB, which explained the earlier failure
-  but not this one. Host tests pass (629 OK).
-- Wrong-slot boot: the panda avatar is only in the new build, so the
-  board is certainly on it.
+  during a reply was only ~27 KB.
+- An SNTP timeout no longer ends speech immediately. The client now attempts
+  the Edge handshake, derives clock skew from a 403 `Date` header, and retries
+  once. The retry orchestration and edge-tts 7.3.1 token vector are host-tested.
 
-**Suspects, ranked:**
+**Physical checks, in order:**
 
-1. **SNTP clock never syncs.** The Edge token needs wall time; on
-   failure the firmware logs `edge_tts: no usable clock, staying
-   text-only` (`muse_edge_tts.c`). Check whether the home LAN blocks
-   UDP 123 / DNS to `pool.ntp.org`.
-2. **TLS/DNS/403 drift** fetching the Edge token or audio from
-   `speech.platform.bing.com` (Sec-MS-GEC v2 token scheme).
-3. **SSML language mismatch:** `xml:lang='en-US'` is hardcoded while the
-   voice is `zh-CN-XiaoxiaoNeural` (low probability, one-line fix).
-4. **Speaker muted in NVS** (`muse_settings.c`, key `"speaker"`; the
-   setup page notes off = "replies are shown, not played" — an exact
-   match for the symptom). Check the on-screen speaker button state.
-5. **Speaker path never verified on rebuilt firmware** (ES8311 DAC +
-   NS4150B amp, GPIO46) — it sits in the open hardware-verification list.
+1. Query status and ensure the NVS speaker setting is on; `>speaker=1`
+   and `>volume=80` set a known audible state.
+2. Send the raw serial character `m` to play the embedded MP3 through
+   the same decoder and speaker path. If this is silent, test the ES8311
+   DAC, NS4150B amp and GPIO46 before changing TTS.
+3. Trigger one reply and capture `edge_tts:` logs. Distinguish SNTP,
+   TLS/DNS, HTTP 403 and no-audio failures rather than treating every
+   text-only reply as the same bug.
+4. Confirm `response` text, decoded MP3 and speaker output together on
+   the physical board before publishing a new binary.
 
-**Reference build:** tts4 app image, 3,084,288 bytes, SHA-256
+**Previous reference only:** the tts4 app image was 3,084,288 bytes,
+SHA-256
 `edaf27f94c5e9014c79edf852e8fdae00f99d891d26b5ff5eb4f2c203f3e1e2b`
-(no binary in this repo — build from source; the hash lets reviewers
-compare builds).
+and does not contain the 256×256 avatar or Edge clock fallback. No binary
+for the current source is committed to this repository.
 
 ## License
 

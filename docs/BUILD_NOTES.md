@@ -1,5 +1,10 @@
 # Waveshare ESP32-S3-Touch-AMOLED-1.43C board for muse-gadget-sdk
 
+> **Historical design note.** This records the original board-port plan.
+> The repository now includes the listed wiring edits, TTS providers,
+> Studio Panda renderer and host checks. Use `README.md` for current setup
+> and `TTS_NOTES.md` for the versioned build and hardware-validation status.
+
 Authored from public sources only; nothing here was compiled (no toolchain
 in this environment), and nothing here contains a secret or credential.
 The SDK token is handled separately (see "Provisioning" below).

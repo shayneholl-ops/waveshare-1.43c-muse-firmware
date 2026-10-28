@@ -60,9 +60,7 @@ static const char *TAG = "muse_ui";
 #define RING_RANGE 1000
 #define CAPTION_W 256           /* 16 columns of unscii_16, the width reply captions wrap to */
 #define CAPTION_LINE_SPACE 2
-#define ART_BLANK_ROWS 5        /* Panda art never reaches the grid's bottom rows
-                                   (shadow ends near row 122 of 128) */
-#define MINI_CELL_PX 2          /* Muse's grid cells over a reply that's read */
+#define ART_BLANK_ROWS (MUSE_PX_H * 5 / 128)
 #define ANSWER_MS 300           /* Muse making room for a reply, and back */
 #define SPEAKER_PX 64
 #define SPEAKER_GROW_PX 8       /* how much the speaker button swells while held */
@@ -750,13 +748,14 @@ static void build_answer(lv_obj_t *face, int ring_in)
     int pitch = lv_font_get_line_height(font) + CAPTION_LINE_SPACE;
 
     answer_layout_t *l = &s_answers[ANSWER_HEARD];
-    int cell = s_canvas_px / MUSE_PX_W - 1;
-    cell = cell > MINI_CELL_PX ? cell : MINI_CELL_PX;
-    l->px = MUSE_PX_W * cell;
+    /* Keep the heard avatar at its established 256 screen px regardless of
+     * whether the renderer uses 64, 128 or 256 source cells. */
+    l->px = 256;
     l->y = s_big_y;
     l->align = LV_TEXT_ALIGN_CENTER;
     int h = 3 * pitch - CAPTION_LINE_SPACE;
-    int art_bottom = l->y + l->px / 2 - ART_BLANK_ROWS * cell;
+    int art_bottom =
+        l->y + l->px / 2 - ART_BLANK_ROWS * l->px / MUSE_PX_W;
     set_reply_box(l, CAPTION_W / cw, 3, reply_bottom(CAPTION_W, ring_in) - h, cw, pitch);
     for (int c = 24; c > l->cols; c--) {   /* wider if it still clears Muse */
         int top = reply_bottom(c * cw, ring_in) - h;
@@ -771,13 +770,13 @@ static void build_answer(lv_obj_t *face, int ring_in)
 
     l = &s_answers[ANSWER_READ];
     int status_bottom = (muse_board->rim_controls ? 40 : 20 + s_dy) + 16 - s_h / 2;
-    /* The read mini stays 128 screen px, as before (MUSE_PX_W *
-     * MINI_CELL_PX at the old 64 grid); that is a screen size, not a
-     * grid size, so it does not double with the grid. */
+    /* The read mini stays 128 screen px; that is a screen size, not a
+     * grid size, so it does not grow with render resolution. */
     l->px = 128;
     l->y = status_bottom + 2 + l->px / 2;   /* its sparkles clear of the status line */
     l->align = LV_TEXT_ALIGN_LEFT;
-    art_bottom = l->y + l->px / 2 - ART_BLANK_ROWS * (l->px / MUSE_PX_W);
+    art_bottom =
+        l->y + l->px / 2 - ART_BLANK_ROWS * l->px / MUSE_PX_W;
     int top = (art_bottom > spk_y + spk_r ? art_bottom : spk_y + spk_r) + 8;
     set_reply_box(l, muse_board->rim_controls ? 13 : 16, 2, top, cw, pitch);
     /* The widest page isn't the biggest: a round screen narrows towards the bottom. */
@@ -1697,10 +1696,8 @@ esp_err_t muse_ui_start(void)
     s_tall = s_small && s_h >= s_w + 64;
     /* Small screens keep room for the status line and button icons. A narrow
      * one is as wide as Muse gets, in whole pixels. */
-    /* The canvas is a screen size, not grid-derived: the grid went 64 ->
-     * 128 without making Muse bigger on screen, so the old MUSE_PX_W * 5
-     * (which only equalled 320 while the grid was 64 wide) is replaced
-     * by the decoupled canvas constant. */
+    /* The canvas is a screen size, not grid-derived. Higher render
+     * resolutions add detail without making Muse bigger on screen. */
     s_canvas_px = s_small ? s_h * 3 / 4 : MUSE_CANVAS_PX;
     if (short_landscape) {
         /* Leave the header's first 40 rows and bottom captions clear. */
@@ -1710,14 +1707,14 @@ esp_err_t muse_ui_start(void)
         s_canvas_px = muse_board->avatar_px;
     }
     if (s_canvas_px > s_w) {
-        s_canvas_px = s_w / MUSE_PX_W * MUSE_PX_W;
+        s_canvas_px = s_w;
     }
     s_dy = (s_h - 466) / 2;
     if (!s_small && muse_board->round && s_dy < 0) {
         /* A shorter screen moves the labels out towards its edges, but a
          * smaller circle's edges curve away from them. Keep them where they
-         * are and shrink Muse to whole pixels that fit between them. */
-        s_canvas_px = (MUSE_CANVAS_PX + 2 * s_dy) / MUSE_PX_W * MUSE_PX_W;
+         * are and shrink Muse to the available screen size. */
+        s_canvas_px = MUSE_CANVAS_PX + 2 * s_dy;
         s_dy = 0;
     }
 

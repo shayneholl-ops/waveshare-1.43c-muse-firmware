@@ -231,7 +231,7 @@ bool muse_edge_tts_time_ready(void)
         }
     }
     if (esp_netif_sntp_sync_wait(pdMS_TO_TICKS(SNTP_WAIT_MS)) != ESP_OK) {
-        ESP_LOGE(TAG, "edge_tts: time sync timed out, staying text-only");
+        ESP_LOGW(TAG, "edge_tts: time sync timed out");
         return false;
     }
     return time(NULL) >= TIME_VALID_AFTER;
@@ -729,26 +729,39 @@ static bool fetch_once(fetch_arg_t *arg, int64_t deadline_us,
     return true;
 }
 
+/*
+ * SNTP is preferred, but it is not the only way to recover wall time. When
+ * UDP/123 is blocked, Edge rejects the deliberately stale token with HTTP 403
+ * and a trusted Date header. fetch_once() converts that Date into s_skew_s;
+ * the second attempt then uses the current five-minute token window.
+ */
+static bool fetch_audio_with_clock_fallback(fetch_arg_t *arg,
+                                            int64_t deadline_us,
+                                            bool clock_ready)
+{
+    if (!clock_ready) {
+        ESP_LOGW(TAG,
+                 "edge_tts: SNTP unavailable, trying Edge Date recovery");
+    }
+    bool got_audio = false;
+    bool retry = false;
+    fetch_once(arg, deadline_us, &got_audio, &retry);
+    if (retry) {
+        bool retry_audio = false;
+        bool retry_again = false;
+        fetch_once(arg, deadline_us, &retry_audio, &retry_again);
+        got_audio = retry_audio;
+    }
+    return got_audio;
+}
+
 static void fetch_task(void *arg_v)
 {
     fetch_arg_t *arg = (fetch_arg_t *)arg_v;
     int64_t deadline_us = esp_timer_get_time() + FETCH_DEADLINE_US;
-    bool got_audio = false;
-    if (!muse_edge_tts_time_ready()) {
-        ESP_LOGE(TAG, "edge_tts: no usable clock, staying text-only");
-    } else {
-        /* fetch_once reports a 403-with-Date retry through retry even
-         * when it returns false, so check the flag, not the result. */
-        bool retry = false;
-        fetch_once(arg, deadline_us, &got_audio, &retry);
-        if (retry) {
-            /* One retry with the server-Date skew, as edge-tts does. */
-            bool retry_audio = false;
-            bool retry_again = false;
-            fetch_once(arg, deadline_us, &retry_audio, &retry_again);
-            got_audio = retry_audio;
-        }
-    }
+    bool clock_ready = muse_edge_tts_time_ready();
+    bool got_audio =
+        fetch_audio_with_clock_fallback(arg, deadline_us, clock_ready);
     /* Report exactly once, even on failure, so the session task never
      * waits on a dead fetch. Stale generations are discarded by pump(). */
     if (arg->gen == s_gen) {

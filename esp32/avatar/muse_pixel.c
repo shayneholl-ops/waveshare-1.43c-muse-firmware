@@ -1,111 +1,104 @@
 // Copyright (c) Meta Platforms, Inc. and affiliates.
 
+/*
+ * Studio Panda is a clean chibi panda built for the round AMOLED: a large
+ * softly shaded head, compact body, small rounded ears and limbs, separated
+ * eye patches, warm muzzle and restrained pink cheeks. The panda stays black
+ * and white while the surrounding light carries each device state, keeping
+ * the character recognizable in every animation without becoming a grey blob.
+ */
+
 #include "muse_pixel.h"
 
 #include <math.h>
+#include <stdbool.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
 #define W MUSE_PX_W
 #define H MUSE_PX_H
-#define TAU 6.2831853f
+#define TAU 6.283185307f
+#define Q 12
+#define ONE (1 << Q)
+#define QF(value) ((int32_t)((value) * ONE))
+#define LOGICAL_SIZE 128
+#define RENDER_SCALE (W / LOGICAL_SIZE)
 
-/* ---------------------------------------------------------------------------
- * Palette
- * ------------------------------------------------------------------------- */
+_Static_assert(W == H, "avatar grid must be square");
+_Static_assert(W % LOGICAL_SIZE == 0, "avatar grid must scale 128 evenly");
 
 enum {
     C_BG = 0,
-    C_OUT,       /* outline */
-    C_OUT2,      /* soft outline where the hood tucks around the face */
-    C_BD,        /* fur dark */
-    C_BM,        /* fur mid */
-    C_BL,        /* fur light */
-    C_BH,        /* fur highlight */
-    C_RIM,       /* state-tinted rim light */
-    C_SKIND,     /* face panel shade */
-    C_SKIN,
-    C_SKINL,
-    C_IRIS,      /* bead eyes */
+    C_OUT,
+    C_BLACK,
+    C_BLACK_L,
+    C_FUR_D,
+    C_FUR,
+    C_FUR_L,
+    C_MUZZLE,
+    C_EYE,
+    C_PUPIL,
     C_SHINE,
-    C_BROW,
-    C_BLUSH,
-    C_BLUSHD,
-    C_MOUTH,
+    C_CHEEK,
     C_TONGUE,
-    C_G0,        /* state glow ramp, bright ... */
-    C_G1,
-    C_G2,
-    C_G3,        /* ... deep */
-    C_AURA1,
-    C_AURA2,
-    C_SPK,
+    C_ACC_D,
     C_ACC,
-    C_SHADOW,
+    C_ACC_L,
+    C_AURA,
+    C_AURA_L,
+    C_ERROR,
     C_HEART,
-    C_WHITE,
+    C_SHADOW,
     C_COUNT,
 };
 
 typedef struct {
-    float r, g, b;
+    float r;
+    float g;
+    float b;
 } rgb_t;
 
-/* Per-mode glow ramp (bright -> deep) and accent. */
 typedef struct {
-    uint32_t f[4];
-    uint32_t acc;
+    uint32_t dark;
+    uint32_t accent;
+    uint32_t light;
 } scheme_t;
 
 static const scheme_t SCHEMES[MUSE_MODE_COUNT] = {
-    [MUSE_MODE_BOOT]      = { { 0xffffff, 0xcfe0ff, 0x8fa8ff, 0x5a5fe0 }, 0xa9c0ff },
-    [MUSE_MODE_IDLE]      = { { 0xf4e8ff, 0xc7a4ff, 0x9a6bff, 0x5b3fd9 }, 0xa77dff },
-    [MUSE_MODE_LISTENING] = { { 0xe8faff, 0x8fdcff, 0x3fa2ff, 0x2a5bd7 }, 0x5cb8ff },
-    [MUSE_MODE_THINKING]  = { { 0xffe6ff, 0xff9cf0, 0xd35bff, 0x7a2bd9 }, 0xe07bff },
-    [MUSE_MODE_SPEAKING]  = { { 0xeafff4, 0x9ff5cf, 0x3fd9a0, 0x1f9a7a }, 0x6ff0bf },
-    [MUSE_MODE_ERROR]     = { { 0xffd6d6, 0xff6b6b, 0xc7304a, 0x6b1a3a }, 0xff5c5c },
-    [MUSE_MODE_OFF]       = { { 0xd8d4ff, 0x8f86d9, 0x5a4fb0, 0x2e2870 }, 0x7c72d0 },
+    [MUSE_MODE_BOOT] = {0x4258a8, 0xa9c0ff, 0xf3f6ff},
+    [MUSE_MODE_IDLE] = {0x5533a8, 0xa77dff, 0xeee6ff},
+    [MUSE_MODE_LISTENING] = {0x1466a8, 0x5cb8ff, 0xdff7ff},
+    [MUSE_MODE_THINKING] = {0x8526a8, 0xe07bff, 0xffe8ff},
+    [MUSE_MODE_SPEAKING] = {0x08765d, 0x6ff0bf, 0xe6fff6},
+    [MUSE_MODE_ERROR] = {0x7a1830, 0xff5c5c, 0xffe0e0},
+    [MUSE_MODE_OFF] = {0x282350, 0x7c72d0, 0xd8d4ff},
 };
 
-/* Panda palette: white head/body, black ears/limbs/patches/nose, grey
- * shading. The state-tinted rim light (C_RIM, mixed from C_BL) still
- * works: C_BL is near-white now, so the rim stays a light tint. */
 static const uint32_t FIXED[C_COUNT] = {
     [C_BG] = 0x000000,
-    [C_OUT] = 0xf2f2f5,   /* near-white outline: black ears/limbs on the
-                              black canvas are only visible because the
-                              outline pass rims them in light */
-    [C_OUT2] = 0x8a8a92,  /* grey tuck shadow where the face meets the body */
-    [C_BD] = 0x9a9aa2,    /* body grey ramp, dark ... */
-    [C_BM] = 0xc9c9cf,
-    [C_BL] = 0xe8e8ea,
-    [C_BH] = 0xffffff,    /* ... to white highlight */
-    [C_SKIND] = 0xd2d2d8, /* face panel shade */
-    [C_SKIN] = 0xf7f7f2,  /* warm white face */
-    [C_SKINL] = 0xffffff,
-    [C_IRIS] = 0x120d0b,
+    [C_OUT] = 0x08090d,
+    [C_BLACK] = 0x17181d,
+    [C_BLACK_L] = 0x343741,
+    [C_FUR_D] = 0xd5d7d5,
+    [C_FUR] = 0xf8f8f2,
+    [C_FUR_L] = 0xffffff,
+    [C_MUZZLE] = 0xfff3dc,
+    [C_EYE] = 0xffffff,
+    [C_PUPIL] = 0x090a0d,
     [C_SHINE] = 0xffffff,
-    [C_BROW] = 0x707078,  /* mid grey: reads on both the black patches
-                              and the white face */
-    [C_BLUSH] = 0xf4aaa0,
-    [C_BLUSHD] = 0xea8f8e,
-    [C_MOUTH] = 0x1a1a1e, /* panda black: mouth, nose, patches, ears, limbs */
-    [C_TONGUE] = 0xe86a7a,
-    [C_SHADOW] = 0x16101f,
+    [C_CHEEK] = 0xff8fa3,
+    [C_TONGUE] = 0xef617c,
+    [C_ERROR] = 0xff4155,
     [C_HEART] = 0xff4f8b,
-    [C_WHITE] = 0xffffff,
+    [C_SHADOW] = 0x12141c,
 };
 
-static rgb_t s_scheme[5];      /* live, blended: f0..f3, acc */
-static bool s_scheme_init;
+static rgb_t s_accent[3];
+static bool s_accent_init;
 static uint16_t s_pal[C_COUNT];
 static uint16_t s_pal_dim[C_COUNT];
 
-/* At the 128x128 grid the frame and mask buffers are 16 KB each. They live
- * in PSRAM when the board has it (32 KB of internal RAM would starve the
- * voice path); on boards without PSRAM, or on the host, they stay put.
- * The buffers are only touched from task context (render + LVGL flush),
- * never from an ISR, so external RAM is safe here. */
 #if defined(ESP_PLATFORM)
 #include "sdkconfig.h"
 #ifdef CONFIG_SPIRAM
@@ -118,83 +111,61 @@ static uint16_t s_pal_dim[C_COUNT];
 #endif
 
 static PIXEL_FB_ATTR uint8_t s_fb[W * H];
-static PIXEL_FB_ATTR uint8_t s_mask[W * H];
 
 static const uint8_t BAYER4[4][4] = {
-    { 0, 8, 2, 10 },
-    { 12, 4, 14, 6 },
-    { 3, 11, 1, 9 },
-    { 15, 7, 13, 5 },
+    {0, 8, 2, 10},
+    {12, 4, 14, 6},
+    {3, 11, 1, 9},
+    {15, 7, 13, 5},
 };
 
-/*
- * The per-pixel work is fixed point (Q12: ONE = 1.0), with tables for the
- * powers and roots: chips without an FPU (ESP32-C6) emulate float in
- * software, which made a frame take 250 ms. At 64 px the quantisation is
- * invisible.
- */
-#define Q 12
-#define ONE (1 << Q)
-#define QF(v) ((int32_t)((v) * ONE))
-#define POW_LUT_N 256
-#define POW_LUT_MAX_Q QF(1.2f)          /* body_field() bails out beyond this */
-#define SQRT_LUT_N 1024                 /* indexed by x >> 2 */
-static int16_t s_pow_dome[POW_LUT_N + 1];   /* |u|^2.7 */
-static int16_t s_pow_base[POW_LUT_N + 1];   /* |u|^3.6 */
-static int16_t s_sqrt[SQRT_LUT_N + 1];
-
-static void init_luts(void)
+static inline float clampf(float value, float low, float high)
 {
-    for (int i = 0; i <= POW_LUT_N; i++) {
-        float u = (float)i * POW_LUT_MAX_Q / POW_LUT_N / ONE;
-        s_pow_dome[i] = (int16_t)(powf(u, 2.7f) * ONE);
-        s_pow_base[i] = (int16_t)(powf(u, 3.6f) * ONE);
-    }
-    for (int i = 0; i <= SQRT_LUT_N; i++) {
-        s_sqrt[i] = (int16_t)(sqrtf((float)i / SQRT_LUT_N) * ONE);
-    }
+    return value < low ? low : (value > high ? high : value);
 }
 
-/* a in [0, POW_LUT_MAX_Q] */
-static inline int32_t pow_q(const int16_t *lut, int32_t a)
+static inline float fracf(float value)
 {
-    return lut[(a * (POW_LUT_N * 65536 / POW_LUT_MAX_Q)) >> 16];
+    return value - floorf(value);
 }
 
-/* sqrt of x in [0, ONE] */
-static inline int32_t sqrt_q(int32_t x)
+static inline int iround(float value)
 {
-    return s_sqrt[x >> 2];
+    return (int)floorf(value + 0.5f);
 }
 
-static inline int32_t bayer_q(int x, int y)
+static inline rgb_t hex_rgb(uint32_t color)
 {
-    return BAYER4[y & 3][x & 3] * (ONE / 16) + ONE / 32;
+    return (rgb_t){
+        (float)((color >> 16) & 0xff),
+        (float)((color >> 8) & 0xff),
+        (float)(color & 0xff),
+    };
 }
 
-static inline float bayer(int x, int y)
+static inline rgb_t mix(rgb_t a, rgb_t b, float amount)
 {
-    return (BAYER4[y & 3][x & 3] + 0.5f) / 16.0f;
+    return (rgb_t){
+        a.r + (b.r - a.r) * amount,
+        a.g + (b.g - a.g) * amount,
+        a.b + (b.b - a.b) * amount,
+    };
 }
 
-static inline rgb_t hex_rgb(uint32_t c)
+static inline rgb_t scale_rgb(rgb_t color, float amount)
 {
-    return (rgb_t){ (float)((c >> 16) & 0xff), (float)((c >> 8) & 0xff), (float)(c & 0xff) };
+    return (rgb_t){
+        color.r * amount,
+        color.g * amount,
+        color.b * amount,
+    };
 }
 
-static inline rgb_t mix(rgb_t a, rgb_t b, float t)
+static inline uint16_t to565(rgb_t color)
 {
-    return (rgb_t){ a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t, a.b + (b.b - a.b) * t };
-}
-
-static inline rgb_t scale_rgb(rgb_t a, float k)
-{
-    return (rgb_t){ a.r * k, a.g * k, a.b * k };
-}
-
-static inline uint16_t to565(rgb_t c)
-{
-    int r = (int)(c.r + 0.5f), g = (int)(c.g + 0.5f), b = (int)(c.b + 0.5f);
+    int r = (int)(color.r + 0.5f);
+    int g = (int)(color.g + 0.5f);
+    int b = (int)(color.b + 0.5f);
     r = r < 0 ? 0 : (r > 255 ? 255 : r);
     g = g < 0 ? 0 : (g > 255 ? 255 : g);
     b = b < 0 ? 0 : (b > 255 ? 255 : b);
@@ -203,82 +174,233 @@ static inline uint16_t to565(rgb_t c)
 
 uint32_t muse_pixel_accent(muse_mode_t mode)
 {
-    return SCHEMES[mode < MUSE_MODE_COUNT ? mode : MUSE_MODE_IDLE].acc;
+    if (mode < 0 || mode >= MUSE_MODE_COUNT) {
+        mode = MUSE_MODE_IDLE;
+    }
+    return SCHEMES[mode].accent;
 }
 
-static void update_palette(const scheme_t *target, float dt)
+static void update_palette(muse_mode_t mode, float dt, float fade)
 {
-    rgb_t tgt[5];
-    for (int i = 0; i < 4; i++) {
-        tgt[i] = hex_rgb(target->f[i]);
+    const scheme_t *target = &SCHEMES[mode];
+    rgb_t next[3] = {
+        hex_rgb(target->dark),
+        hex_rgb(target->accent),
+        hex_rgb(target->light),
+    };
+    float amount = s_accent_init ? 1.0f - expf(-dt * 7.0f) : 1.0f;
+    for (int i = 0; i < 3; i++) {
+        s_accent[i] = mix(s_accent[i], next[i], amount);
     }
-    tgt[4] = hex_rgb(target->acc);
+    s_accent_init = true;
 
-    float k = s_scheme_init ? 1.0f - expf(-dt * 7.0f) : 1.0f;
-    for (int i = 0; i < 5; i++) {
-        s_scheme[i] = mix(s_scheme[i], tgt[i], k);
-    }
-    s_scheme_init = true;
-
-    rgb_t pal[C_COUNT];
+    rgb_t palette[C_COUNT];
+    float fixed_fade = 0.18f + 0.82f * fade;
     for (int i = 0; i < C_COUNT; i++) {
-        pal[i] = hex_rgb(FIXED[i]);
+        palette[i] = scale_rgb(hex_rgb(FIXED[i]), fixed_fade);
     }
-    rgb_t acc = s_scheme[4];
-    pal[C_G0] = s_scheme[0];
-    pal[C_G1] = s_scheme[1];
-    pal[C_G2] = s_scheme[2];
-    pal[C_G3] = s_scheme[3];
-    pal[C_ACC] = acc;
-    pal[C_RIM] = mix(pal[C_BL], acc, 0.45f);
-    pal[C_AURA1] = scale_rgb(acc, 0.16f);
-    pal[C_AURA2] = scale_rgb(acc, 0.34f);
-    pal[C_SPK] = mix(acc, pal[C_WHITE], 0.45f);
+    palette[C_BG] = hex_rgb(FIXED[C_BG]);
+    palette[C_ACC_D] = scale_rgb(s_accent[0], fade);
+    palette[C_ACC] = scale_rgb(s_accent[1], fade);
+    palette[C_ACC_L] = scale_rgb(s_accent[2], fade);
+    palette[C_AURA] = scale_rgb(s_accent[0], 0.31f * fade);
+    palette[C_AURA_L] = scale_rgb(s_accent[1], 0.58f * fade);
 
     for (int i = 0; i < C_COUNT; i++) {
-        s_pal[i] = to565(pal[i]);
-        /* The block edge shade gives the enlarged pixels a faint grid texture. */
-        s_pal_dim[i] = to565(scale_rgb(pal[i], 0.72f));
+        s_pal[i] = to565(palette[i]);
+        s_pal_dim[i] = to565(scale_rgb(palette[i], 0.72f));
     }
 }
 
-/* ---------------------------------------------------------------------------
- * Primitive helpers
- * ------------------------------------------------------------------------- */
-
-static inline void px(int x, int y, uint8_t c)
+static inline void raw_px(int x, int y, uint8_t color)
 {
     if ((unsigned)x < W && (unsigned)y < H) {
-        s_fb[y * W + x] = c;
+        s_fb[y * W + x] = color;
     }
 }
 
-static inline uint8_t get_px(int x, int y)
+/* Direct detail marks use the original 128-unit design grid. Curves below
+ * rasterize at the full render resolution instead of expanding old pixels. */
+static inline void px(int x, int y, uint8_t color)
 {
-    if ((unsigned)x < W && (unsigned)y < H) {
-        return s_fb[y * W + x];
+    int left = x * RENDER_SCALE;
+    int top = y * RENDER_SCALE;
+    for (int row = 0; row < RENDER_SCALE; row++) {
+        for (int column = 0; column < RENDER_SCALE; column++) {
+            raw_px(left + column, top + row, color);
+        }
     }
-    return C_BG;
 }
 
-static inline int iround(float v)
+static void line(int x0, int y0, int x1, int y1, uint8_t color)
 {
-    return (int)floorf(v + 0.5f);
+    x0 *= RENDER_SCALE;
+    y0 *= RENDER_SCALE;
+    x1 *= RENDER_SCALE;
+    y1 *= RENDER_SCALE;
+    int dx = abs(x1 - x0);
+    int sx = x0 < x1 ? 1 : -1;
+    int dy = -abs(y1 - y0);
+    int sy = y0 < y1 ? 1 : -1;
+    int err = dx + dy;
+    for (;;) {
+        raw_px(x0, y0, color);
+        if (x0 == x1 && y0 == y1) {
+            return;
+        }
+        int twice = err * 2;
+        if (twice >= dy) {
+            err += dy;
+            x0 += sx;
+        }
+        if (twice <= dx) {
+            err += dx;
+            y0 += sy;
+        }
+    }
 }
 
-static inline float clampf(float v, float lo, float hi)
+static void thick_line(int x0, int y0, int x1, int y1, uint8_t color)
 {
-    return v < lo ? lo : (v > hi ? hi : v);
+    line(x0, y0, x1, y1, color);
+    if (abs(x1 - x0) >= abs(y1 - y0)) {
+        line(x0, y0 + 1, x1, y1 + 1, color);
+    } else {
+        line(x0 + 1, y0, x1 + 1, y1, color);
+    }
 }
 
-static inline float fracf(float v)
+static void disc(int cx, int cy, int radius, uint8_t color)
 {
-    return v - floorf(v);
+    cx *= RENDER_SCALE;
+    cy *= RENDER_SCALE;
+    radius *= RENDER_SCALE;
+    int radius2 = radius * radius;
+    for (int y = -radius; y <= radius; y++) {
+        int y2 = y * y;
+        for (int x = -radius; x <= radius; x++) {
+            if (x * x + y2 <= radius2) {
+                raw_px(cx + x, cy + y, color);
+            }
+        }
+    }
 }
 
-/* Cheap deterministic pseudo-random for idle behaviour. */
+typedef struct {
+    int32_t cx;
+    int32_t cy;
+    int32_t c;
+    int32_t s;
+    int32_t inner_rx;
+    int32_t inner_ry;
+    int32_t outer_rx;
+    int32_t outer_ry;
+    int bound;
+} ellipse_q_t;
+
+static int32_t ellipse_field(int32_t dx, int32_t dy, int32_t c, int32_t s,
+                             int32_t inv_rx, int32_t inv_ry,
+                             int32_t *u_out, int32_t *v_out)
+{
+    int32_t u = (int32_t)(((int64_t)dx * c + (int64_t)dy * s) >> Q);
+    int32_t v = (int32_t)(((int64_t)dy * c - (int64_t)dx * s) >> Q);
+    int32_t nu = (int32_t)(((int64_t)u * inv_rx) >> Q);
+    int32_t nv = (int32_t)(((int64_t)v * inv_ry) >> Q);
+    if (u_out) {
+        *u_out = nu;
+    }
+    if (v_out) {
+        *v_out = nv;
+    }
+    return (int32_t)(((int64_t)nu * nu + (int64_t)nv * nv) >> Q);
+}
+
+static uint8_t tone_for(int32_t u, int32_t v, int x, int y,
+                        uint8_t shadow, uint8_t base, uint8_t light)
+{
+    int32_t lighting = -u - v;
+    int threshold = BAYER4[y & 3][x & 3];
+    if (lighting > QF(0.78f) ||
+        (lighting > QF(0.52f) && threshold < 6)) {
+        return light;
+    }
+    if (lighting < -QF(0.78f) ||
+        (lighting < -QF(0.52f) && threshold > 9)) {
+        return shadow;
+    }
+    return base;
+}
+
+static void ellipse(float cx, float cy, float rx, float ry, float angle,
+                    float outline_px, uint8_t outline, uint8_t shadow,
+                    uint8_t base, uint8_t light)
+{
+    cx *= RENDER_SCALE;
+    cy *= RENDER_SCALE;
+    rx *= RENDER_SCALE;
+    ry *= RENDER_SCALE;
+    outline_px *= RENDER_SCALE;
+    rx = rx < 1.0f ? 1.0f : rx;
+    ry = ry < 1.0f ? 1.0f : ry;
+    ellipse_q_t shape = {
+        .cx = QF(cx),
+        .cy = QF(cy),
+        .c = QF(cosf(angle)),
+        .s = QF(sinf(angle)),
+        .inner_rx = QF(1.0f / rx),
+        .inner_ry = QF(1.0f / ry),
+        .outer_rx = QF(1.0f / (rx + outline_px)),
+        .outer_ry = QF(1.0f / (ry + outline_px)),
+        .bound = iround(rx + ry + outline_px + 2.0f),
+    };
+    int center_x = iround(cx);
+    int center_y = iround(cy);
+    for (int y = center_y - shape.bound; y <= center_y + shape.bound; y++) {
+        int32_t dy = y * ONE + ONE / 2 - shape.cy;
+        for (int x = center_x - shape.bound; x <= center_x + shape.bound;
+             x++) {
+            int32_t dx = x * ONE + ONE / 2 - shape.cx;
+            if (ellipse_field(dx, dy, shape.c, shape.s, shape.outer_rx,
+                              shape.outer_ry, NULL, NULL) > ONE) {
+                continue;
+            }
+            int32_t u;
+            int32_t v;
+            if (ellipse_field(dx, dy, shape.c, shape.s, shape.inner_rx,
+                              shape.inner_ry, &u, &v) > ONE) {
+                raw_px(x, y, outline);
+                continue;
+            }
+            raw_px(x, y, tone_for(u, v, x, y, shadow, base, light));
+        }
+    }
+}
+
+static void flat_ellipse(float cx, float cy, float rx, float ry, float angle,
+                         uint8_t color)
+{
+    ellipse(cx, cy, rx, ry, angle, 0.0f, color, color, color, color);
+}
+
+typedef struct {
+    float next_blink;
+    float blink_start;
+    float next_gaze;
+    float gaze_x;
+    float gaze_y;
+    float target_x;
+    float target_y;
+    float last_t;
+} motion_t;
+
+static motion_t s_motion = {
+    .next_blink = 1.6f,
+    .blink_start = -10.0f,
+    .next_gaze = 1.1f,
+};
 static uint32_t s_rng = 0x9e3779b9u;
-static float frand(void)
+
+static float random_unit(void)
 {
     s_rng ^= s_rng << 13;
     s_rng ^= s_rng >> 17;
@@ -286,376 +408,88 @@ static float frand(void)
     return (float)(s_rng & 0xffffff) / (float)0x1000000;
 }
 
-/* Draw a small bitmap given as rows of '.'/'#'/'o' characters. */
-static void stamp(const char *const *rows, int nrows, int x0, int y0, uint8_t fill, uint8_t alt)
+static float update_eyes(const muse_pose_t *pose, float dt)
 {
-    for (int r = 0; r < nrows; r++) {
-        for (int c = 0; rows[r][c]; c++) {
-            char ch = rows[r][c];
-            if (ch == '#') {
-                px(x0 + c, y0 + r, fill);
-            } else if (ch == 'o') {
-                px(x0 + c, y0 + r, alt);
-            }
-        }
+    if (pose->t >= s_motion.next_blink) {
+        s_motion.blink_start = pose->t;
+        s_motion.next_blink =
+            pose->t + (random_unit() < 0.18f ? 0.30f
+                                             : 2.2f + random_unit() * 3.0f);
     }
-}
-
-/* ---------------------------------------------------------------------------
- * Idle behaviour: blinking and gaze
- * ------------------------------------------------------------------------- */
-
-typedef struct {
-    float next_blink;
-    float blink_start;
-    float next_gaze;
-    float gx, gy;          /* current gaze, -1..1 */
-    float tgx, tgy;        /* target gaze */
-    float last_t;
-} eyes_t;
-
-static eyes_t s_eyes = { .next_blink = 1.5f, .blink_start = -10, .next_gaze = 1.0f };
-
-static float eyes_update(const muse_pose_t *p, float dt)
-{
-    eyes_t *e = &s_eyes;
-
-    if (p->t >= e->next_blink) {
-        e->blink_start = p->t;
-        /* Occasionally double-blink. */
-        e->next_blink = p->t + (frand() < 0.2f ? 0.28f : 2.2f + frand() * 3.0f);
+    if (pose->t >= s_motion.next_gaze) {
+        s_motion.next_gaze = pose->t + 1.2f + random_unit() * 2.4f;
+        s_motion.target_x = random_unit() * 2.0f - 1.0f;
+        s_motion.target_y = (random_unit() * 2.0f - 1.0f) * 0.55f;
     }
 
-    if (p->t >= e->next_gaze) {
-        e->next_gaze = p->t + 1.2f + frand() * 2.4f;
-        if (frand() < 0.35f) {
-            e->tgx = 0;
-            e->tgy = 0;
-        } else {
-            e->tgx = frand() * 2 - 1;
-            e->tgy = (frand() * 2 - 1) * 0.6f;
-        }
+    float target_x = s_motion.target_x;
+    float target_y = s_motion.target_y;
+    if (pose->mode == MUSE_MODE_LISTENING ||
+        pose->mode == MUSE_MODE_SPEAKING) {
+        target_x = 0;
+        target_y = 0;
+    } else if (pose->mode == MUSE_MODE_THINKING) {
+        target_x = 0.8f * sinf(pose->mode_t * 1.4f) + 0.1f;
+        target_y = -0.8f;
     }
+    float amount = 1.0f - expf(-dt * 14.0f);
+    s_motion.gaze_x += (target_x - s_motion.gaze_x) * amount;
+    s_motion.gaze_y += (target_y - s_motion.gaze_y) * amount;
 
-    float tgx = e->tgx, tgy = e->tgy;
-    switch (p->mode) {
-    case MUSE_MODE_LISTENING:
-        tgx = 0;
-        tgy = 0.1f;
-        break;
-    case MUSE_MODE_THINKING:
-        tgx = 0.75f * sinf(p->mode_t * 1.3f) + 0.25f;
-        tgy = -0.85f;
-        break;
-    case MUSE_MODE_SPEAKING:
-        tgx *= 0.3f;
-        tgy = 0;
-        break;
-    default:
-        break;
-    }
-    float k = 1.0f - expf(-dt * 14.0f);
-    e->gx += (tgx - e->gx) * k;
-    e->gy += (tgy - e->gy) * k;
-
-    /* Blink curve: 0 = open, 1 = shut. */
-    float bt = (p->t - e->blink_start) / 0.16f;
-    if (bt < 0 || bt > 1) {
+    float blink_t = (pose->t - s_motion.blink_start) / 0.16f;
+    if (blink_t < 0 || blink_t > 1) {
         return 0;
     }
-    return 1.0f - fabsf(bt * 2 - 1);
+    return 1.0f - fabsf(blink_t * 2.0f - 1.0f);
 }
 
-/* ---------------------------------------------------------------------------
- * Scene layers
- * ------------------------------------------------------------------------- */
-
-static void draw_aura(float cx, float cy, float radius, float strength)
+static void draw_orbit(int cx, int cy, float t, muse_mode_t mode, float level)
 {
-    int x0 = (int)(cx - radius - 1), x1 = (int)(cx + radius + 1);
-    int y0 = (int)(cy - radius - 1), y1 = (int)(cy + radius + 1);
-    /* Distances in 1/16 px; the root of d2 / r2 comes from the table. */
-    int32_t cx16 = (int32_t)(cx * 16), r2 = (int32_t)(radius * radius * 256);
-    int32_t to_idx = (int32_t)((float)SQRT_LUT_N * 65536 / r2);
-    int32_t str = QF(strength);
-    for (int y = y0; y <= y1; y++) {
-        int32_t dy = (int32_t)((y + 0.5f - cy) * 1.1f * 16);
-        int32_t dy2 = dy * dy;
-        if (dy2 >= r2) {
-            continue;
-        }
-        for (int x = x0; x <= x1; x++) {
-            int32_t dx = x * 16 + 8 - cx16;
-            int32_t d2 = dx * dx + dy2;
-            if (d2 >= r2) {
-                continue;
-            }
-            int32_t i = ((ONE - s_sqrt[(d2 * to_idx) >> 16]) * str) >> Q;
-            int32_t b = bayer_q(x, y);
-            if (i > QF(0.55f) + ((b * QF(0.35f)) >> Q)) {
-                px(x, y, C_AURA2);
-            } else if (i > (b * QF(0.9f)) >> Q) {
-                px(x, y, C_AURA1);
-            }
+    int count = mode == MUSE_MODE_BOOT ? 9 : 16;
+    float speed = mode == MUSE_MODE_THINKING ? 1.2f : 0.42f;
+    for (int i = 0; i < count; i++) {
+        float angle = t * speed + (float)i * TAU / count;
+        float radius = 57.0f + 2.0f * sinf(t * 1.1f + i * 1.3f);
+        int x = iround(cx + cosf(angle) * radius);
+        int y = iround(cy + sinf(angle) * radius * 0.94f);
+        uint8_t color = (i + (int)(t * 3.0f)) % 4 == 0 ? C_ACC_L
+                                                        : C_AURA_L;
+        px(x, y, color);
+        if (level > 0.7f && (i & 3) == 0) {
+            px(x + 1, y, color);
         }
     }
 }
 
-/* Expanding dotted rings (listening / speaking). */
-static void draw_rings(float cx, float cy, float t, float level, float speed)
+static void draw_side_waves(int cx, int cy, float t, float level)
 {
-    for (int k = 0; k < 2; k++) {
-        float ph = fracf(t * speed + k * 0.5f);
-        float r = 20 + ph * 11;
-        float fade = (1 - ph) * (0.35f + level);
-        int n = (int)(r * 2.2f);
-        for (int i = 0; i < n; i++) {
-            float a = i * TAU / n;
-            int x = iround(cx + cosf(a) * r);
-            int y = iround(cy + sinf(a) * r * 0.92f);
-            if (get_px(x, y) == C_BG || get_px(x, y) == C_AURA1) {
-                if (bayer(x, y) < fade) {
-                    px(x, y, fade > 0.6f ? C_ACC : C_AURA2);
+    int waves = 1 + (int)(level * 2.8f);
+    for (int side = -1; side <= 1; side += 2) {
+        for (int wave = 0; wave < waves; wave++) {
+            float radius = 39.0f + wave * 7.0f;
+            float shimmer = 0.5f + 0.5f * sinf(t * 9.0f + wave * 1.4f);
+            for (int point = -5 - wave; point <= 5 + wave; point++) {
+                float y = point * 2.0f;
+                float x = sqrtf(fmaxf(0.0f, radius * radius - y * y));
+                int px_x = iround(cx + side * x);
+                int px_y = iround(cy + y);
+                if (wave == 0 || BAYER4[px_y & 3][px_x & 3] <
+                                     4 + (int)(shimmer * 8.0f)) {
+                    px(px_x, px_y, wave == 0 ? C_ACC : C_AURA_L);
                 }
             }
         }
     }
 }
 
-static void draw_shadow(float cx, float y, float half_w)
+static void draw_shadow(int cx, int cy, float width)
 {
-    for (int row = 0; row < 6; row++) {
-        float hw = half_w * (row == 2 || row == 3 ? 1.0f : 0.72f);
-        for (int x = iround(cx - hw); x <= iround(cx + hw); x++) {
-            float edge = fabsf(x + 0.5f - cx) / hw;
-            if (bayer(x, (int)y + row) > edge * 0.8f) {
-                px(x, (int)y + row, C_SHADOW);
-            }
-        }
-    }
-}
-
-/* Stable per-position hash (0..65535) so fur tufts don't shimmer as the avatar moves. */
-static inline int32_t hash16(int x, int y)
-{
-    uint32_t h = (uint32_t)x * 374761393u + (uint32_t)y * 668265263u;
-    h = (h ^ (h >> 13)) * 1274126177u;
-    return (int32_t)((h ^ (h >> 16)) & 0xffff);
-}
-
-/*
- * The avatar: a panda — white rounded body, white face panel, black ears,
- * black eye patches, black nose, black arms and feet. The body and face
- * fields are the same superellipse machinery the old character used, so
- * the motion (bob, breathe, lean, hop, squash) carries over unchanged.
- */
-typedef struct {
-    float cx, cy;   /* body centre */
-    float a, b;     /* half width, half height */
-    float fx, fy;   /* face panel centre */
-    float fa, fb;   /* face panel half extents */
-} avatar_t;
-
-/* Per-row parts of the body and face fields, in Q12. */
-typedef struct {
-    int32_t v;          /* body: normalised y */
-    int32_t inv_a;      /* 1 / half width at this row */
-    const int16_t *lut;
-    bool body;          /* |v| inside the table */
-    int32_t v_pow;      /* |v|^n */
-    int32_t fv, fv4;    /* face: normalised y, and its 4th power */
-} row_t;
-
-static inline void row_setup(const avatar_t *j, float y, row_t *r)
-{
-    float v = (y - j->cy) / j->b;
-    float a = j->a * (1 + 0.07f * clampf(v, -1, 1));   /* widens a touch at the base */
-    r->v = QF(v);
-    r->inv_a = QF(1.0f / a);
-    r->lut = v < 0 ? s_pow_dome : s_pow_base;
-    r->body = abs(r->v) <= POW_LUT_MAX_Q;
-    r->v_pow = r->body ? pow_q(r->lut, abs(r->v)) : 0;
-    float fv = clampf((y - j->fy) / j->fb, -8, 8);
-    r->fv = QF(fv);
-    r->fv4 = QF(fminf(fv * fv * fv * fv, 16));
-}
-
-/* Superellipse field for the body: round dome on top, squarer bottom. */
-static inline int32_t body_field(const row_t *r, int32_t dx, int32_t *ux)
-{
-    int32_t u = (dx * r->inv_a) >> Q;
-    *ux = u;
-    if (!r->body || abs(u) > POW_LUT_MAX_Q) {
-        return 2 * ONE;
-    }
-    return pow_q(r->lut, abs(u)) + r->v_pow;
-}
-
-/* Fur tone from a surface normal, with vertical streaks for texture. */
-static uint8_t fur(int32_t nx, int32_t ny, int x, int y, int ox, int oy)
-{
-    int32_t r2 = (nx * nx + ny * ny) >> Q;
-    int32_t nz = r2 >= ONE ? 0 : sqrt_q(ONE - r2);
-    int32_t l = (-QF(0.40f) * nx - QF(0.50f) * ny + QF(0.76f) * nz) >> Q;
-    int32_t b = bayer_q(x, y);
-    int rx = x - ox, ry = y - oy;
-    int32_t streak = (hash16(rx, (ry + (rx & 1) * 2) / 3) >> 4) - ONE / 2;
-    int32_t lv = l + (((b - ONE / 2) * QF(0.2f)) >> Q) + ((streak * QF(0.22f)) >> Q);
-    if (r2 > QF(0.86f) && ((nx * QF(0.6f) + ny * QF(0.8f)) >> Q) > QF(0.72f) && b < QF(0.4f)) {
-        return C_RIM;
-    }
-    return lv > QF(0.95f) ? C_BH : lv > QF(0.62f) ? C_BL : lv > QF(0.28f) ? C_BM : C_BD;
-}
-
-typedef struct {
-    float x, y;
-    float angle;    /* radians; positive tips the bottom outward to the right */
-} limb_t;
-
-/* A limb ellipse, set up for Q12 hit tests. */
-typedef struct {
-    int32_t x, y, c, s, inv_rx, inv_ry, r;
-} limb_q_t;
-
-static void limb_setup(const limb_t *l, float rx, float ry, limb_q_t *q)
-{
-    q->x = QF(l->x);
-    q->y = QF(l->y);
-    q->c = QF(cosf(l->angle));
-    q->s = QF(sinf(l->angle));
-    q->inv_rx = QF(1.0f / rx);
-    q->inv_ry = QF(1.0f / ry);
-    q->r = QF(rx > ry ? rx : ry);
-}
-
-static inline bool in_limb(const limb_q_t *l, int32_t x, int32_t y, int32_t *lx, int32_t *ly)
-{
-    int32_t dx = x - l->x, dy = y - l->y;
-    if (abs(dx) > l->r || abs(dy) > l->r) {
-        return false;
-    }
-    int32_t u = ((((dx * l->c) >> Q) + ((dy * l->s) >> Q)) * l->inv_rx) >> Q;
-    int32_t v = ((((dy * l->c) >> Q) - ((dx * l->s) >> Q)) * l->inv_ry) >> Q;
-    *lx = u;
-    *ly = v;
-    return u * u + v * v <= ONE * ONE;
-}
-
-enum { M_NONE, M_BODY, M_ARM, M_FOOT, M_FACE };
-
-static void draw_avatar(const avatar_t *j, const limb_t arms[2], const limb_t feet[2])
-{
-    memset(s_mask, 0, sizeof(s_mask));
-    limb_q_t arm_q[2], foot_q[2];
-    for (int i = 0; i < 2; i++) {
-        limb_setup(&arms[i], 5.8f, 10.4f, &arm_q[i]);
-        limb_setup(&feet[i], 8.8f, 5.2f, &foot_q[i]);
-    }
-    /* Panda ears: black circles at the top of the head, riding on the
-     * body's bob/lean/squash via j. They carry the M_BODY mask so the
-     * outline pass rims them in light against the black canvas. */
-    float ear_dx = j->a * 0.72f, ear_cy = j->cy - j->b * 0.92f, ear_r = j->a * 0.34f;
-    /* Only rows/columns that can hold the avatar are shaded. */
-    int x0 = (int)(j->cx - j->a * 1.1f - 16), x1 = (int)(j->cx + j->a * 1.1f + 16);
-    int y0 = (int)(j->cy - j->b - 16), y1 = (int)(j->cy + j->b + 10);
-    x0 = x0 < 0 ? 0 : x0;
-    y0 = y0 < 0 ? 0 : y0;
-    x1 = x1 >= W ? W - 1 : x1;
-    y1 = y1 >= H ? H - 1 : y1;
-    int ox = iround(j->cx), oy = iround(j->cy);
-    int32_t cx = QF(j->cx), fcx = QF(j->fx), inv_fa = QF(1.0f / j->fa);
-
-    for (int y = y0; y <= y1; y++) {
-        row_t row;
-        row_setup(j, y + 0.5f, &row);
-        int32_t fy = y * ONE + ONE / 2;
-        for (int x = x0; x <= x1; x++) {
-            int32_t fx = x * ONE + ONE / 2;
-            int32_t lx, ly;
-
-            /* Panda ears, checked first so they win where they overlap
-             * the dome. */
-            float pdx = x + 0.5f - (j->cx - ear_dx), pdy = y + 0.5f - ear_cy;
-            float qdx = x + 0.5f - (j->cx + ear_dx);
-            if ((pdx * pdx + pdy * pdy <= ear_r * ear_r) ||
-                (qdx * qdx + pdy * pdy <= ear_r * ear_r)) {
-                s_mask[y * W + x] = M_BODY;
-                px(x, y, C_MOUTH);
-                continue;
-            }
-
-            /* Arms sit in front of the body; panda arms are solid black. */
-            bool arm = false;
-            for (int a = 0; a < 2 && !arm; a++) {
-                if (in_limb(&arm_q[a], fx, fy, &lx, &ly)) {
-                    s_mask[y * W + x] = M_ARM;
-                    px(x, y, C_MOUTH);
-                    arm = true;
-                }
-            }
-            if (arm) {
-                continue;
-            }
-
-            int32_t ux, uy = row.v;
-            int32_t v = body_field(&row, fx - cx, &ux);
-            /* Fuzzy silhouette: tufts poke in and out along the edge. */
-            int32_t tuft = ((hash16(x - ox, y - oy) - 32768) * QF(0.16f)) >> 16;
-            if (v <= ONE + tuft) {
-                int32_t fu = ((fx - fcx) * inv_fa) >> Q;
-                fu = fu > 3 * ONE ? 3 * ONE : fu < -3 * ONE ? -3 * ONE : fu;
-                int32_t fu2 = (fu * fu) >> Q;
-                int32_t ff = ((fu2 * fu2) >> Q) + row.fv4;
-                int32_t b = bayer_q(x, y);
-                if (ff <= ONE) {
-                    s_mask[y * W + x] = M_FACE;
-                    int32_t fv = row.fv, fv1 = fv + QF(0.15f);
-                    uint8_t c = C_SKIN;
-                    if (fv < -QF(0.55f) && b < ((-fv - QF(0.45f)) * QF(1.8f)) >> Q) {
-                        c = C_SKIND;   /* face shading at the top */
-                    } else if (((fu2 * QF(1.4f)) >> Q) + ((fv1 * fv1) >> Q) < QF(0.32f) && b < QF(0.55f)) {
-                        c = C_SKINL;
-                    } else if (fv > QF(0.75f) && b < QF(0.4f)) {
-                        c = C_SKIND;
-                    }
-                    px(x, y, c);
-                } else {
-                    s_mask[y * W + x] = M_BODY;
-                    /* Fur darkens where it tucks around the face. */
-                    if (ff < QF(1.75f) && (ff < QF(1.3f) || b < ((QF(1.75f) - ff) * QF(1.4f)) >> Q)) {
-                        px(x, y, ff < QF(1.3f) ? C_OUT2 : C_BD);
-                    } else {
-                        px(x, y, fur((ux * QF(0.95f)) >> Q, (uy * QF(0.95f)) >> Q, x, y, ox, oy));
-                    }
-                }
-                continue;
-            }
-
-            for (int f = 0; f < 2; f++) {
-                if (in_limb(&foot_q[f], fx, fy, &lx, &ly)) {
-                    s_mask[y * W + x] = M_FOOT;
-                    px(x, y, C_MOUTH);   /* panda feet are solid black */
-                    break;
-                }
-            }
-        }
-    }
-
-    /* Hard outline on the silhouette, and seams where parts overlap. */
-    static const int8_t N4[4][2] = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } };
-    for (int y = 0; y < H; y++) {
-        for (int x = 0; x < W; x++) {
-            uint8_t m = s_mask[y * W + x];
-            if (m == M_NONE || m == M_FACE) {
-                continue;
-            }
-            for (int k = 0; k < 4; k++) {
-                int xx = x + N4[k][0], yy = y + N4[k][1];
-                uint8_t n = ((unsigned)xx < W && (unsigned)yy < H) ? s_mask[yy * W + xx] : M_NONE;
-                if (n == M_NONE || (m == M_ARM && (n == M_BODY || n == M_FACE)) || (m == M_BODY && n == M_FOOT)) {
-                    px(x, y, C_OUT);
-                    break;
-                }
+    int half = iround(width);
+    for (int y = 0; y < 5; y++) {
+        int row_half = half - abs(2 - y) * 3;
+        for (int x = -row_half; x <= row_half; x++) {
+            if (BAYER4[y & 3][x & 3] > abs(x) * 12 / (row_half + 1)) {
+                px(cx + x, cy + y, C_SHADOW);
             }
         }
     }
@@ -665,518 +499,386 @@ typedef enum {
     EYES_NORMAL,
     EYES_WIDE,
     EYES_HAPPY,
-    EYES_X,
+    EYES_ERROR,
+    EYES_CLOSED,
 } eye_style_t;
 
-/* Panda eyes: black beads on the black eye patches. The bead alone would
- * vanish into the patch, so it gets a white halo ring, and all the
- * linework styles (happy arcs, X, shut lids) are drawn in white so they
- * read on the patch. */
-static void draw_eye(float ex, float ey, float openness, eye_style_t style, float gx, float gy)
+static void draw_eye(float cx, float cy, eye_style_t style, float openness,
+                     float gaze_x, float gaze_y)
 {
-    int cx = iround(ex + gx * 1.6f), cy = iround(ey + gy * 1.4f);
-
+    int x = iround(cx);
+    int y = iround(cy);
     if (style == EYES_HAPPY) {
-        static const char *const HAPPY[] = { "..####..", ".##..##.", "##....##", "##....##" };
-        stamp(HAPPY, 4, iround(ex) - 4, iround(ey), C_WHITE, C_WHITE);
+        thick_line(x - 4, y + 1, x, y - 2, C_EYE);
+        thick_line(x, y - 2, x + 4, y + 1, C_EYE);
         return;
     }
-    if (style == EYES_X) {
-        static const char *const XS[] = { "##......##", ".##....##.", "..##..##..", "...####...",
-                                          "...####...", "..##..##..", ".##....##.", "##......##" };
-        stamp(XS, 8, iround(ex) - 5, iround(ey) - 4, C_WHITE, C_WHITE);
+    if (style == EYES_ERROR) {
+        thick_line(x - 3, y - 3, x + 3, y + 3, C_EYE);
+        thick_line(x + 3, y - 3, x - 3, y + 3, C_EYE);
         return;
     }
-    if (openness < 0.3f) {
-        static const char *const SHUT[] = { "##....##", "##....##", ".##..##.", "..####.." };
-        stamp(SHUT, 4, iround(ex) - 4, iround(ey) + 2, C_WHITE, C_WHITE);
+    if (style == EYES_CLOSED || openness < 0.28f) {
+        thick_line(x - 4, y, x + 4, y, C_EYE);
         return;
     }
 
-    static const char *const BEAD[] = { "..####..", ".######.", "##oo###.", "########",
-                                        "########", "########", ".######.", "..####.." };
-    static const char *const BEAD_HALO[] = { "....####....", "..########..", ".##########.",
-                                             "############", "############", ".##########.",
-                                             "..########..", "....####...." };
-    static const char *const BIG[] = { "..####..", ".######.", "##oo###.", "##oo###.",
-                                       "########", "########", "########", "########",
-                                       ".######.", "..####.." };
-    static const char *const BIG_HALO[] = { "....####....", "..########..", ".##########.",
-                                            "############", "############", "############",
-                                            "############", ".##########.", "..########..",
-                                            "....####...." };
-    const char *const *rows = style == EYES_WIDE ? BIG : BEAD;
-    const char *const *halo = style == EYES_WIDE ? BIG_HALO : BEAD_HALO;
-    int n = style == EYES_WIDE ? 10 : 8;
-    int top = style == EYES_WIDE ? cy - 5 : cy - 4;
-    /* Lids close from the top: skip the upper rows as openness drops. */
-    int skip = iround((1 - openness) * (n - 1));
-    stamp(halo + skip, n - skip, cx - 6, top + skip, C_WHITE, C_WHITE);
-    stamp(rows + skip, n - skip, cx - 4, top + skip, C_IRIS, skip ? C_IRIS : C_SHINE);
-}
-
-static void draw_blush(int x, int y, float strength)
-{
-    static const char *const CHEEK[] = { "..####..", ".######.", "########", "########",
-                                         ".######.", "..####.." };
-    for (int j = 0; j < 6; j++) {
-        for (int i = 0; i < 8; i++) {
-            if (CHEEK[j][i] != '#') {
-                continue;
-            }
-            float b = bayer(x + i, y + j);
-            if (b < strength) {
-                px(x - 4 + i, y + j, (j == 2 || j == 3) && b < strength * 0.5f ? C_BLUSHD : C_BLUSH);
-            }
-        }
-    }
+    float rx = style == EYES_WIDE ? 4.5f : 4.0f;
+    float ry = style == EYES_WIDE ? 5.0f : 4.1f;
+    flat_ellipse(cx, cy, rx, ry, 0, C_EYE);
+    int pupil_x = x + iround(gaze_x * 1.4f);
+    int pupil_y = y + iround(gaze_y * 1.2f);
+    disc(pupil_x, pupil_y, style == EYES_WIDE ? 2 : 2, C_PUPIL);
+    px(pupil_x - 1, pupil_y - 1, C_SHINE);
 }
 
 typedef enum {
     MOUTH_SMILE,
-    MOUTH_O,
-    MOUTH_HMM,
-    MOUTH_TALK,
+    MOUTH_LISTEN,
+    MOUTH_THINK,
+    MOUTH_SPEAK,
     MOUTH_GRIN,
     MOUTH_FLAT,
-} mouth_t;
+} mouth_style_t;
 
-static void draw_mouth(int x, int y, mouth_t m, float open)
+static void draw_nose_and_mouth(int cx, int cy, mouth_style_t style,
+                                float level)
 {
-    switch (m) {
-    case MOUTH_SMILE: {
-        static const char *const S[] = { "##......##", "##......##", ".##....##.", "..######.." };
-        stamp(S, 4, x - 5, y, C_MOUTH, C_MOUTH);
+    px(cx - 2, cy, C_BLACK);
+    px(cx - 1, cy, C_BLACK);
+    px(cx, cy, C_BLACK);
+    px(cx + 1, cy, C_BLACK);
+    px(cx + 2, cy, C_BLACK);
+    px(cx - 1, cy + 1, C_BLACK);
+    px(cx, cy + 1, C_BLACK);
+    px(cx + 1, cy + 1, C_BLACK);
+
+    int mouth_y = cy + 4;
+    switch (style) {
+    case MOUTH_SMILE:
+        line(cx, cy + 2, cx, mouth_y, C_BLACK);
+        line(cx, mouth_y, cx - 4, mouth_y + 2, C_BLACK);
+        line(cx, mouth_y, cx + 4, mouth_y + 2, C_BLACK);
+        break;
+    case MOUTH_LISTEN:
+        flat_ellipse(cx, mouth_y + 1, 3.0f, 4.0f, 0, C_BLACK);
+        flat_ellipse(cx, mouth_y + 1, 1.2f, 2.0f, 0, C_TONGUE);
+        break;
+    case MOUTH_THINK:
+        line(cx - 4, mouth_y + 1, cx + 1, mouth_y + 1, C_BLACK);
+        line(cx + 1, mouth_y + 1, cx + 3, mouth_y - 1, C_BLACK);
+        break;
+    case MOUTH_SPEAK: {
+        float open = 3.0f + level * 4.0f;
+        flat_ellipse(cx, mouth_y + 2, 4.5f, open, 0, C_BLACK);
+        flat_ellipse(cx, mouth_y + 4, 2.6f, 1.8f, 0, C_TONGUE);
         break;
     }
-    case MOUTH_O: {
-        static const char *const S[] = { "..####..", ".######.", "##oooo##", "##oooo##",
-                                         ".######.", "..####.." };
-        stamp(S, 6, x - 4, y - 2, C_MOUTH, C_TONGUE);
+    case MOUTH_GRIN:
+        flat_ellipse(cx, mouth_y + 1, 7.0f, 4.0f, 0, C_BLACK);
+        line(cx - 4, mouth_y, cx + 4, mouth_y, C_EYE);
+        flat_ellipse(cx, mouth_y + 3, 3.0f, 1.4f, 0, C_TONGUE);
         break;
-    }
-    case MOUTH_HMM: {
-        static const char *const S[] = { "....##", "....##", "####..", "####.." };
-        stamp(S, 4, x - 2, y, C_MOUTH, C_MOUTH);
+    case MOUTH_FLAT:
+        thick_line(cx - 5, mouth_y + 1, cx + 5, mouth_y + 1, C_BLACK);
         break;
-    }
-    case MOUTH_TALK: {
-        int h = 2 + iround(clampf(open, 0, 1) * 6.0f);
-        int w = h > 4 ? 8 : 6;
-        for (int j = 0; j < h; j++) {
-            int inset = (j == 0 || j == h - 1) && h > 4 ? 2 : 0;
-            for (int i = inset; i < w - inset; i++) {
-                bool tongue = h >= 6 && (j == h - 2 || j == h - 3) && i > inset && i < w - inset - 1;
-                px(x - w / 2 + i, y + j, tongue ? C_TONGUE : C_MOUTH);
-            }
-        }
-        break;
-    }
-    case MOUTH_GRIN: {
-        static const char *const S[] = { "##########", "##########", ".##oooo##.", "..######..",
-                                         "...####...", "...####..." };
-        stamp(S, 6, x - 5, y, C_MOUTH, C_TONGUE);
-        break;
-    }
-    case MOUTH_FLAT: {
-        static const char *const S[] = { "####", "####" };
-        stamp(S, 2, x - 2, y + 2, C_MOUTH, C_MOUTH);
-        break;
-    }
     }
 }
 
-static void draw_sparkle(int x, int y, float twinkle, bool front)
+static void draw_face(float head_x, float head_y, const muse_pose_t *pose,
+                      float blink)
 {
-    uint8_t arm = front ? C_ACC : C_AURA2;
-    uint8_t core = front ? C_WHITE : C_SPK;
-    if (twinkle > 0.8f) {
-        px(x, y, core);
-        for (int k = 2; k <= 4; k += 2) {
-            uint8_t c = k == 2 ? (front ? C_SPK : arm) : arm;
-            px(x + k, y, c);
-            px(x - k, y, c);
-            px(x, y + k, c);
-            px(x, y - k, c);
-        }
-    } else if (twinkle > 0.45f) {
-        px(x, y, front ? C_SPK : arm);
-        px(x + 2, y, arm);
-        px(x - 2, y, arm);
-        px(x, y + 2, arm);
-        px(x, y - 2, arm);
-    } else if (twinkle > 0.15f) {
-        px(x, y, arm);
-    }
-}
+    float eye_y = head_y - 1.0f;
+    float eye_dx = 13.0f;
+    flat_ellipse(head_x - eye_dx, eye_y, 10.0f, 7.7f, 0.27f, C_BLACK);
+    flat_ellipse(head_x + eye_dx, eye_y, 10.0f, 7.7f, -0.27f, C_BLACK);
 
-static void draw_sparkles(const muse_pose_t *p, float cx, float cy, bool front, float speed, int count)
-{
-    for (int i = 0; i < count; i++) {
-        float a = p->t * speed + i * TAU / count;
-        float s = sinf(a);
-        if ((s > 0) != front) {
-            continue;
-        }
-        float rr = 50.0f + 4.0f * sinf(i * 1.9f + p->t * 0.7f);
-        int x = iround(cx + cosf(a) * rr);
-        int y = iround(cy - 6 + s * rr * 0.42f);
-        float tw = 0.5f + 0.5f * sinf(p->t * 5.0f + i * 1.7f);
-        draw_sparkle(x, y, tw, front);
-    }
-}
-
-/* Sound waves either side of the head. */
-static void draw_waves(float cx, float cy, float body_rx, float level, float t)
-{
-    int n = 1 + (int)(clampf(level, 0, 1) * 3.2f);
-    if (n > 3) {
-        n = 3;
-    }
-    for (int k = 0; k < n; k++) {
-        float r = body_rx + 10.0f + k * 6.0f;
-        int span = 4 + k * 2;
-        float flick = 0.5f + 0.5f * sinf(t * 12.0f - k * 1.4f);
-        for (int side = -1; side <= 1; side += 2) {
-            for (int j = -span; j <= span; j++) {
-                float xo = r - (float)(j * j) / (2.0f * r) * 6.0f;
-                int x = iround(cx + side * xo);
-                int y = iround(cy - 4 + j);
-                if (k == 0 || bayer(x, y) < 0.35f + flick * 0.65f) {
-                    px(x, y, k == 0 ? C_ACC : (k == 1 ? C_G1 : C_G2));
-                }
-            }
-        }
-    }
-}
-
-static void draw_thought_dots(float x, float y, float t)
-{
-    int active = (int)(fracf(t * 1.6f) * 3.0f);
-    for (int i = 0; i < 3; i++) {
-        int bx = iround(x + i * 8);
-        int by = iround(y - i * 6) - (i == active ? 2 : 0);
-        for (int dx = 0; dx < 4; dx++) {
-            for (int dy = 0; dy < 4; dy++) {
-                bool corner = dx >= 2 && dy >= 2;
-                px(bx + dx, by + dy, corner ? (i == active ? C_G1 : C_G2)
-                                            : (i == active ? C_G0 : C_ACC));
-            }
-        }
-    }
-}
-
-static void draw_hearts(float cx, float top, float t, float amount)
-{
-    static const char *const HEART[] = { "..##..##..", ".####.####", "##oo######", "##########",
-                                         "##########", "##########", ".########.", "..######..",
-                                         "...####...", "....##...." };
-    for (int i = 0; i < 2; i++) {
-        float ph = fracf(t * 0.9f + i * 0.5f);
-        if (ph > amount) {
-            continue;
-        }
-        int hx = iround(cx + (i ? 26 : -36) + sinf(ph * TAU + i) * 4);
-        int hy = iround(top - ph * 20);
-        stamp(HEART, 10, hx, hy, C_HEART, C_WHITE);
-    }
-}
-
-static void draw_alert(int x, int y)
-{
-    static const char *const BANG[] = { "..####..", "..####..", "..####..", "..####..",
-                                        "..####..", "..####..", "..####..", "..####..",
-                                        "........", "........", "..####..", "..####.." };
-    stamp(BANG, 12, x - 4, y, C_ACC, C_ACC);
-}
-
-/* Panda eye patch: a tilted black ellipse around the eye. Left and right
- * patches mirror: each slants down towards the nose. Kept small enough
- * (rx 8.5, ry 5.5, tilt 0.3) that the two patches stay separate: at the
- * old rx 9.6 / ry 7.0 / 0.4 tilt their lower inner corners met and merged
- * into a solid bar that swallowed the nose. */
-static void draw_eye_patch(float ex, float ey, float angle)
-{
-    float rx = 8.5f, ry = 5.5f;
-    float c = cosf(angle), s = sinf(angle);
-    int x0 = iround(ex - rx - 1), x1 = iround(ex + rx + 1);
-    int y0 = iround(ey - ry - 1), y1 = iround(ey + ry + 1);
-    for (int y = y0; y <= y1; y++) {
-        for (int x = x0; x <= x1; x++) {
-            float dx = x + 0.5f - ex, dy = y + 0.5f - ey;
-            float u = dx * c + dy * s, v = -dx * s + dy * c;
-            if ((u * u) / (rx * rx) + (v * v) / (ry * ry) <= 1.0f) {
-                px(x, y, C_MOUTH);
-            }
-        }
-    }
-}
-
-/* Panda nose: a wide-topped black triangle just above the mouth. */
-static void draw_nose(int x, int y)
-{
-    static const char *const NOSE[] = { ".####.", "######", "..##.." };
-    stamp(NOSE, 3, x - 3, y, C_MOUTH, C_MOUTH);
-}
-
-/* ---------------------------------------------------------------------------
- * Frame
- * ------------------------------------------------------------------------- */
-
-/*
- * Screen pixel -> grid cell, with 0x80 set on a cell's last screen pixel. When
- * cells are 3+ pixels, that edge is drawn dimmer so the pixel grid shows.
- */
-#define MAP_MAX 512
-static uint8_t s_map[MAP_MAX];
-static int s_size;
-
-void muse_pixel_set_size(int px)
-{
-    s_size = px < MAP_MAX ? px : MAP_MAX;
-    bool grid = s_size >= 3 * W;
-    for (int i = 0; i < s_size; i++) {
-        int cell = i * W / s_size;
-        bool edge = grid && (i + 1) * W / s_size != cell;
-        s_map[i] = (uint8_t)(cell | (edge ? 0x80 : 0));
-    }
-}
-
-void muse_pixel_scale(uint16_t *dst, int stride_px, int x0, int x1, int y0, int y1)
-{
-    int n = x1 - x0 + 1;
-    const uint8_t *xmap = &s_map[x0];
-    const uint16_t *prev = NULL;
-    uint8_t prev_m = 0;
-    for (int y = y0; y <= y1; y++, dst += stride_px) {
-        uint8_t m = s_map[y];
-        if (prev && m == prev_m) {
-            memcpy(dst, prev, n * sizeof(uint16_t));
-            continue;
-        }
-        const uint8_t *row = &s_fb[(m & 0x7f) * W];
-        if (m & 0x80) {
-            for (int i = 0; i < n; i++) {
-                dst[i] = s_pal_dim[row[xmap[i] & 0x7f]];
-            }
-        } else {
-            for (int i = 0; i < n; i++) {
-                uint8_t xm = xmap[i];
-                uint8_t c = row[xm & 0x7f];
-                dst[i] = xm & 0x80 ? s_pal_dim[c] : s_pal[c];
-            }
-        }
-        prev = dst;
-        prev_m = m;
-    }
-}
-
-void muse_pixel_render(const muse_pose_t *p)
-{
-    static bool s_luts;
-    if (!s_luts) {
-        init_luts();
-        s_luts = true;
-    }
-    float dt = s_eyes.last_t > 0 ? clampf(p->t - s_eyes.last_t, 0, 0.2f) : 0.04f;
-    s_eyes.last_t = p->t;
-
-    muse_mode_t mode = p->mode;
-    /* Powering down: the avatar waves, then nods off as the glow fades. */
-    float fade = mode == MUSE_MODE_OFF ? clampf(1.0f - p->mode_t / 1.3f, 0, 1) : 1.0f;
-    float happy = p->happy;
-    float level = p->level;
-    float t = p->t;
-
-    update_palette(&SCHEMES[mode], dt);
-    float blink = eyes_update(p, dt);
-
-    memset(s_fb, C_BG, sizeof(s_fb));
-
-    /* ---- body motion (all amplitudes in 128-grid cells) ---- */
-    float bob, breathe_rate = 2.0f, lean = 0, hop = 0;
-    switch (mode) {
-    case MUSE_MODE_LISTENING:
-        bob = sinf(t * 3.0f) * 1.2f;
-        break;
-    case MUSE_MODE_THINKING:
-        bob = sinf(t * 2.4f) * 1.6f;
-        lean = sinf(t * 1.3f) * 2.4f;
-        break;
-    case MUSE_MODE_SPEAKING:
-        bob = sinf(t * 5.0f) * 1.2f - level * 3.0f;
-        break;
-    case MUSE_MODE_ERROR:
-        bob = 2.0f;
-        lean = sinf(t * 18.0f) * (p->mode_t < 0.6f ? 2.0f : 0.0f);
-        break;
-    default:
-        bob = sinf(t * 1.8f) * 2.0f;
-        break;
-    }
-    if (happy > 0) {
-        hop = fabsf(sinf(t * 9.0f)) * 6.0f * happy;
-    }
-
-    /* Boot: the avatar pops up from a squash, then opens their eyes. */
-    float boot = mode == MUSE_MODE_BOOT ? clampf(p->mode_t / 1.4f, 0, 1) : 1.0f;
-    float pop = mode == MUSE_MODE_BOOT ? clampf(p->mode_t / 0.6f, 0, 1) : 1.0f;
-    float squash = 1.0f - (1.0f - pop) * 0.35f + sinf(pop * 3.1416f) * 0.06f;
-
-    float breathe = sinf(t * breathe_rate + 1.0f) * 0.03f;
-    avatar_t j;
-    j.a = 32.0f * (1 + breathe) * (2.0f - squash) + level * 1.6f;
-    j.b = 46.0f * (1 - breathe) * squash;
-    j.cx = 64.0f + lean;
-    j.cy = 113.0f - j.b + bob * 0.5f - hop;   /* feet stay near the ground */
-    j.fa = j.a * 0.66f;
-    j.fb = 14.8f * squash;
-    j.fx = j.cx + lean * 0.6f;
-    j.fy = j.cy - j.b * 0.30f + bob * 0.3f;
-
-    /* ---- background layers ---- */
-    float aura_r = 58.0f + level * 8.0f + sinf(t * 1.5f) * 2.0f;
-    float aura_s = (0.75f * boot + level * 0.4f) * fade;
-    draw_aura(j.cx, j.cy - 6, aura_r, aura_s);
-    if (mode == MUSE_MODE_LISTENING) {
-        draw_rings(j.cx, j.fy + 4, t, level, 0.9f);
-    } else if (mode == MUSE_MODE_SPEAKING) {
-        draw_rings(j.cx, j.fy + 4, t, level, 0.6f);
-    }
-    draw_shadow(j.cx, 117.0f, 26.0f - hop * 1.6f);
-
-    float spk_speed = mode == MUSE_MODE_THINKING ? 2.8f : mode == MUSE_MODE_LISTENING ? 1.2f
-                    : mode == MUSE_MODE_SPEAKING ? 1.5f : 0.6f;
-    int spk_count = mode == MUSE_MODE_BOOT ? (int)(boot * 6) : (int)(6 * fade);
-    draw_sparkles(p, j.cx, j.cy, false, spk_speed, spk_count);
-
-    /* ---- limbs ---- */
-    float base = j.cy + j.b;
-    limb_t feet[2];
-    float step = mode == MUSE_MODE_SPEAKING ? sinf(t * 5.0f) * 1.2f : 0.0f;
-    feet[0] = (limb_t){ j.cx - 14.0f, base - 1.0f + (happy > 0 ? hop * 0.3f : step), -0.15f };
-    feet[1] = (limb_t){ j.cx + 14.0f, base - 1.0f + (happy > 0 ? hop * 0.3f : -step), 0.15f };
-
-    limb_t arms[2];
-    float adx = j.a + 0.6f;
-    float ay = j.cy + 8.0f;
-    switch (mode) {
-    case MUSE_MODE_LISTENING:
-        /* Hands raised beside the face, like cupping an ear. */
-        arms[0] = (limb_t){ j.cx - adx + 2.0f, j.fy + 10.0f, 0.55f };
-        arms[1] = (limb_t){ j.cx + adx - 2.0f, j.fy + 10.0f, -0.55f };
-        break;
-    case MUSE_MODE_THINKING:
-        /* One paw up to the chin. */
-        arms[0] = (limb_t){ j.cx - adx, ay, -0.35f };
-        arms[1] = (limb_t){ j.cx + 15.0f, j.fy + j.fb + 7.0f, -1.1f };
-        break;
-    case MUSE_MODE_OFF: {
-        float w = sinf(t * 12.0f) * 0.35f * fade;
-        arms[0] = (limb_t){ j.cx - adx, ay, -0.3f };
-        arms[1] = (limb_t){ j.cx + adx + 2.0f, j.cy - 8.0f, -2.3f - w };
-        break;
-    }
-    case MUSE_MODE_SPEAKING: {
-        float w = sinf(t * 7.0f) * (0.25f + level * 0.45f);
-        arms[0] = (limb_t){ j.cx - adx, ay - 2.0f, -0.4f - w };
-        arms[1] = (limb_t){ j.cx + adx, ay - 2.0f, 0.4f - w };
-        break;
-    }
-    default: {
-        float sway = sinf(t * 1.8f + 0.6f) * 0.08f;
-        if (happy > 0) {
-            /* Arms up and wiggling. */
-            float wig = sinf(t * 14.0f) * 0.25f;
-            arms[0] = (limb_t){ j.cx - adx - 2.0f, j.cy - 8.0f, 2.4f + wig };
-            arms[1] = (limb_t){ j.cx + adx + 2.0f, j.cy - 8.0f, -2.4f - wig };
-        } else {
-            arms[0] = (limb_t){ j.cx - adx, ay, -0.3f + sway };
-            arms[1] = (limb_t){ j.cx + adx, ay, 0.3f - sway };
-        }
-        break;
-    }
-    }
-    draw_avatar(&j, arms, feet);
-
-    /* ---- face ---- */
-    float eye_y = j.fy - 1.0f;
-    float eye_dx = j.fa * 0.48f;
-    eye_style_t style = EYES_NORMAL;
-    float open = 1.0f - blink;
-    mouth_t mouth = MOUTH_SMILE;
-    float mouth_open = 0;
-
-    switch (mode) {
-    case MUSE_MODE_BOOT:
-        open = p->mode_t < 0.9f ? 0.0f : clampf((p->mode_t - 0.9f) / 0.3f, 0, 1);
-        break;
-    case MUSE_MODE_LISTENING:
-        style = EYES_WIDE;
-        mouth = MOUTH_O;
-        break;
-    case MUSE_MODE_THINKING:
-        open *= 0.85f;
-        mouth = MOUTH_HMM;
-        break;
-    case MUSE_MODE_SPEAKING:
-        mouth = MOUTH_TALK;
-        mouth_open = level * 1.3f + 0.1f * (0.5f + 0.5f * sinf(t * 22.0f));
-        break;
-    case MUSE_MODE_ERROR:
-        style = EYES_X;
+    eye_style_t eyes = EYES_NORMAL;
+    mouth_style_t mouth = MOUTH_SMILE;
+    float openness = 1.0f - blink;
+    if (pose->mode == MUSE_MODE_BOOT) {
+        openness =
+            clampf((pose->mode_t - 0.66f) / 0.28f, 0.0f, 1.0f);
+    } else if (pose->mode == MUSE_MODE_LISTENING) {
+        eyes = EYES_WIDE;
+        mouth = MOUTH_LISTEN;
+    } else if (pose->mode == MUSE_MODE_THINKING) {
+        mouth = MOUTH_THINK;
+    } else if (pose->mode == MUSE_MODE_SPEAKING) {
+        mouth = MOUTH_SPEAK;
+    } else if (pose->mode == MUSE_MODE_ERROR) {
+        eyes = EYES_ERROR;
         mouth = MOUTH_FLAT;
-        break;
-    case MUSE_MODE_OFF:
-        open = clampf((1.0f - p->mode_t / 1.0f) * 1.5f, 0, 1);
-        mouth = MOUTH_SMILE;
-        break;
-    default:
-        break;
+    } else if (pose->mode == MUSE_MODE_OFF) {
+        eyes = EYES_CLOSED;
+        openness = 0;
     }
-    if (happy > 0.2f && mode != MUSE_MODE_ERROR) {
-        style = EYES_HAPPY;
+    if (pose->happy > 0.2f && pose->mode != MUSE_MODE_ERROR) {
+        eyes = EYES_HAPPY;
         mouth = MOUTH_GRIN;
     }
 
-    /* Panda eye patches first, then the beads on top of them. */
-    draw_eye_patch(j.fx - eye_dx, eye_y, 0.3f);
-    draw_eye_patch(j.fx + eye_dx, eye_y, -0.3f);
-    draw_eye(j.fx - eye_dx, eye_y, open, style, s_eyes.gx, s_eyes.gy);
-    draw_eye(j.fx + eye_dx, eye_y, open, style, s_eyes.gx, s_eyes.gy);
+    draw_eye(head_x - eye_dx, eye_y, eyes, openness, s_motion.gaze_x,
+             s_motion.gaze_y);
+    draw_eye(head_x + eye_dx, eye_y, eyes, openness, s_motion.gaze_x,
+             s_motion.gaze_y);
 
-    /* Tiny brows for the expressive states. */
-    int bl = iround(j.fx - eye_dx), br = iround(j.fx + eye_dx), by = iround(eye_y) - 8;
-    if (mode == MUSE_MODE_THINKING) {
-        px(bl - 2, by + 2, C_BROW); px(bl, by + 2, C_BROW);
-        px(br - 2, by, C_BROW); px(br, by - 2, C_BROW);
-    } else if (mode == MUSE_MODE_LISTENING) {
-        px(bl - 2, by - 2, C_BROW); px(bl - 1, by - 2, C_BROW);
-        px(br - 2, by - 2, C_BROW); px(br - 1, by - 2, C_BROW);
+    if (pose->mode == MUSE_MODE_LISTENING) {
+        thick_line(iround(head_x - 20), iround(eye_y - 10),
+                   iround(head_x - 12), iround(eye_y - 12), C_BLACK_L);
+        thick_line(iround(head_x + 12), iround(eye_y - 12),
+                   iround(head_x + 20), iround(eye_y - 10), C_BLACK_L);
+    } else if (pose->mode == MUSE_MODE_THINKING) {
+        thick_line(iround(head_x - 20), iround(eye_y - 10),
+                   iround(head_x - 12), iround(eye_y - 11), C_BLACK_L);
+        thick_line(iround(head_x + 12), iround(eye_y - 13),
+                   iround(head_x + 20), iround(eye_y - 10), C_BLACK_L);
     }
 
-    float blush = 0.55f + happy * 0.45f + (mode == MUSE_MODE_SPEAKING ? 0.15f : 0.0f);
-    draw_blush(iround(j.fx - j.fa * 0.72f), iround(eye_y + 4), blush);
-    draw_blush(iround(j.fx + j.fa * 0.72f), iround(eye_y + 4), blush);
+    flat_ellipse(head_x, head_y + 12.0f, 10.0f, 7.0f, 0, C_MUZZLE);
+    disc(iround(head_x - 23.0f), iround(head_y + 10.0f), 2, C_CHEEK);
+    disc(iround(head_x + 23.0f), iround(head_y + 10.0f), 2, C_CHEEK);
+    draw_nose_and_mouth(
+        iround(head_x), iround(head_y + 8.0f), mouth,
+        clampf(pose->level * 1.15f +
+                   0.08f * (1.0f + sinf(pose->t * 21.0f)),
+               0.0f, 1.0f));
+}
 
-    draw_nose(iround(j.fx), iround(eye_y) + 4);
-    draw_mouth(iround(j.fx), iround(eye_y + 6), mouth, mouth_open);
-
-    /* ---- foreground ---- */
-    draw_sparkles(p, j.cx, j.cy, true, spk_speed, spk_count);
-
-    float top = j.cy - j.b;
-    if (mode == MUSE_MODE_LISTENING || mode == MUSE_MODE_SPEAKING) {
-        draw_waves(j.cx, j.fy + 4, j.a, level, t);
+static void draw_thought_dots(int cx, int cy, float t)
+{
+    int active = (int)(fracf(t * 1.4f) * 3.0f);
+    for (int i = 0; i < 3; i++) {
+        int radius = 2 + i;
+        int x = cx + 34 + i * 8;
+        int y = cy - 30 - i * 6 - (i == active ? 2 : 0);
+        disc(x, y, radius, i == active ? C_ACC_L : C_ACC);
     }
-    if (mode == MUSE_MODE_THINKING) {
-        draw_thought_dots(j.cx + 28, top + 4, t);
+}
+
+static void draw_alert(int cx, int cy)
+{
+    for (int y = 0; y < 10; y++) {
+        int half = y < 6 ? 2 : 1;
+        for (int x = -half; x <= half; x++) {
+            px(cx + x, cy + y, C_ERROR);
+        }
+    }
+    disc(cx, cy + 14, 2, C_ERROR);
+}
+
+static void draw_heart(int cx, int cy)
+{
+    disc(cx - 3, cy - 2, 3, C_HEART);
+    disc(cx + 3, cy - 2, 3, C_HEART);
+    for (int y = 0; y < 7; y++) {
+        int half = 6 - y;
+        for (int x = -half; x <= half; x++) {
+            px(cx + x, cy + y, C_HEART);
+        }
+    }
+}
+
+static void draw_hearts(int cx, int cy, float t, float amount)
+{
+    for (int i = 0; i < 2; i++) {
+        float phase = fracf(t * 0.72f + i * 0.5f);
+        if (phase > amount) {
+            continue;
+        }
+        int x = iround(cx + (i ? 34.0f : -34.0f) +
+                       sinf(phase * TAU + i) * 4.0f);
+        int y = iround(cy - 18.0f - phase * 14.0f);
+        draw_heart(x, y);
+    }
+}
+
+static void draw_panda(const muse_pose_t *pose, float reveal, float fade)
+{
+    float level = clampf(pose->level, 0.0f, 1.0f);
+    float happy = pose->mode == MUSE_MODE_ERROR
+                      ? 0.0f
+                      : clampf(pose->happy, 0.0f, 1.0f);
+    float hop = happy * fabsf(sinf(pose->t * 8.5f)) * 6.0f;
+    float bob = sinf(pose->t * 1.8f) * 1.2f;
+    if (pose->mode == MUSE_MODE_LISTENING) {
+        bob = sinf(pose->t * 3.0f) * 0.8f;
+    } else if (pose->mode == MUSE_MODE_THINKING) {
+        bob = sinf(pose->t * 2.2f) * 1.4f;
+    } else if (pose->mode == MUSE_MODE_SPEAKING) {
+        bob = sinf(pose->t * 5.0f) * 0.8f - level * 1.8f;
+    }
+    float shake = pose->mode == MUSE_MODE_ERROR && pose->mode_t < 0.6f
+                      ? sinf(pose->t * 21.0f) * 3.0f
+                      : 0.0f;
+    float lean = pose->mode == MUSE_MODE_THINKING
+                     ? sinf(pose->t * 1.25f) * 2.0f
+                     : 0.0f;
+    float squash = 0.40f + 0.60f * reveal;
+    float breathe = sinf(pose->t * 2.0f + 0.7f) * 0.018f;
+    float center_x = 64.0f + shake + lean;
+    float center_y = 64.0f + bob - hop;
+    float head_x = center_x + lean * 0.45f;
+    float head_y = center_y - 15.0f;
+    float body_y = center_y + 23.0f;
+
+    draw_shadow(iround(center_x), iround(center_y + 55.0f),
+                24.0f - hop * 1.1f);
+
+    float body_rx = 24.0f * (1.0f + breathe) * squash;
+    float body_ry = 27.0f * (1.0f - breathe) * squash;
+    ellipse(center_x, body_y, body_rx, body_ry, 0, 2.0f, C_OUT, C_FUR_D,
+            C_FUR, C_FUR_L);
+
+    float feet_y = body_y + body_ry - 1.0f;
+    ellipse(center_x - 13.0f, feet_y, 10.0f * squash, 5.5f * squash,
+            -0.08f, 1.4f, C_OUT, C_OUT, C_BLACK, C_BLACK_L);
+    ellipse(center_x + 13.0f, feet_y, 10.0f * squash, 5.5f * squash,
+            0.08f, 1.4f, C_OUT, C_OUT, C_BLACK, C_BLACK_L);
+
+    float left_x = center_x - 24.0f;
+    float right_x = center_x + 24.0f;
+    float arm_y = body_y - 2.0f;
+    float left_angle = -0.22f;
+    float right_angle = 0.22f;
+    if (pose->mode == MUSE_MODE_LISTENING) {
+        left_x = head_x - 32.0f;
+        right_x = head_x + 32.0f;
+        arm_y = head_y + 8.0f;
+        left_angle = 0.55f;
+        right_angle = -0.55f;
+    } else if (pose->mode == MUSE_MODE_THINKING) {
+        right_x = head_x + 18.0f;
+        arm_y = head_y + 22.0f;
+        right_angle = -1.05f;
+    } else if (pose->mode == MUSE_MODE_SPEAKING) {
+        float gesture = sinf(pose->t * 7.0f) * (0.2f + level * 0.35f);
+        left_angle = -0.6f - gesture;
+        right_angle = 0.6f - gesture;
+        arm_y -= 3.0f;
+    } else if (pose->mode == MUSE_MODE_OFF) {
+        right_x = head_x + 32.0f;
+        arm_y = head_y + 3.0f;
+        right_angle = -1.35f + sinf(pose->t * 11.0f) * 0.18f * fade;
+    }
+    if (happy > 0.15f) {
+        left_x = head_x - 31.0f;
+        right_x = head_x + 31.0f;
+        arm_y = head_y + 2.0f;
+        float wiggle = sinf(pose->t * 14.0f) * 0.24f;
+        left_angle = 0.95f + wiggle;
+        right_angle = -0.95f - wiggle;
+    }
+    ellipse(left_x, arm_y, 7.0f * squash, 14.0f * squash, left_angle,
+            1.5f, C_OUT, C_OUT, C_BLACK, C_BLACK_L);
+    ellipse(right_x, arm_y, 7.0f * squash, 14.0f * squash, right_angle,
+            1.5f, C_OUT, C_OUT, C_BLACK, C_BLACK_L);
+
+    float head_rx = 34.0f * (1.0f + breathe) * squash;
+    float head_ry = 28.0f * (1.0f - breathe) * squash;
+    float ear_y = head_y - head_ry * 0.72f;
+    float ear_dx = head_rx * 0.68f;
+    ellipse(head_x - ear_dx, ear_y, 12.0f * squash, 12.0f * squash, 0,
+            1.5f, C_OUT, C_OUT, C_BLACK, C_BLACK_L);
+    ellipse(head_x + ear_dx, ear_y, 12.0f * squash, 12.0f * squash, 0,
+            1.5f, C_OUT, C_OUT, C_BLACK, C_BLACK_L);
+    ellipse(head_x, head_y, head_rx, head_ry, 0, 2.0f, C_OUT, C_FUR_D,
+            C_FUR, C_FUR_L);
+
+    if (reveal > 0.55f) {
+        draw_face(head_x, head_y, pose, update_eyes(pose, 0.04f));
+    }
+
+    if (pose->mode == MUSE_MODE_THINKING) {
+        draw_thought_dots(iround(head_x), iround(head_y), pose->t);
+    }
+    if (pose->mode == MUSE_MODE_ERROR) {
+        draw_alert(iround(head_x + 40.0f), iround(head_y - 33.0f));
     }
     if (happy > 0) {
-        draw_hearts(j.cx, top + 2, t, happy);
+        draw_hearts(iround(head_x), iround(head_y), pose->t, happy);
     }
-    if (mode == MUSE_MODE_ERROR) {
-        draw_alert(iround(j.cx + 36), iround(top - 2));
-    }
+}
 
+#define MAP_MAX 512
+static uint16_t s_map[MAP_MAX];
+static int s_size;
+
+void muse_pixel_set_size(int pixels)
+{
+    s_size = pixels < 1 ? 1 : (pixels < MAP_MAX ? pixels : MAP_MAX);
+    bool show_grid = s_size >= 3 * W;
+    for (int i = 0; i < s_size; i++) {
+        int cell = i * W / s_size;
+        bool edge = show_grid && (i + 1) * W / s_size != cell;
+        s_map[i] = (uint16_t)(cell | (edge ? 0x8000 : 0));
+    }
+}
+
+void muse_pixel_scale(uint16_t *dst, int stride_px, int x0, int x1, int y0,
+                      int y1)
+{
+    int count = x1 - x0 + 1;
+    const uint16_t *xmap = &s_map[x0];
+    const uint16_t *previous = NULL;
+    uint16_t previous_map = 0;
+    for (int y = y0; y <= y1; y++, dst += stride_px) {
+        uint16_t mapped_y = s_map[y];
+        if (previous && mapped_y == previous_map) {
+            memcpy(dst, previous, (size_t)count * sizeof(uint16_t));
+            continue;
+        }
+        const uint8_t *row = &s_fb[(mapped_y & 0x7fff) * W];
+        if (mapped_y & 0x8000) {
+            for (int i = 0; i < count; i++) {
+                dst[i] = s_pal_dim[row[xmap[i] & 0x7fff]];
+            }
+        } else {
+            for (int i = 0; i < count; i++) {
+                uint16_t mapped_x = xmap[i];
+                uint8_t color = row[mapped_x & 0x7fff];
+                dst[i] =
+                    mapped_x & 0x8000 ? s_pal_dim[color] : s_pal[color];
+            }
+        }
+        previous = dst;
+        previous_map = mapped_y;
+    }
+}
+
+void muse_pixel_render(const muse_pose_t *pose)
+{
+    muse_mode_t mode = pose->mode;
+    if (mode < 0 || mode >= MUSE_MODE_COUNT) {
+        mode = MUSE_MODE_IDLE;
+    }
+    float dt = s_motion.last_t > 0
+                   ? clampf(pose->t - s_motion.last_t, 0.0f, 0.2f)
+                   : 0.04f;
+    s_motion.last_t = pose->t;
+    float fade =
+        mode == MUSE_MODE_OFF
+            ? clampf(1.0f - pose->mode_t / 1.35f, 0.0f, 1.0f)
+            : 1.0f;
+    update_palette(mode, dt, fade);
+    memset(s_fb, C_BG, sizeof(s_fb));
+
+    float reveal =
+        mode == MUSE_MODE_BOOT
+            ? clampf(pose->mode_t / 0.72f, 0.0f, 1.0f)
+            : 1.0f;
+    if (mode == MUSE_MODE_OFF) {
+        reveal *= 0.72f + 0.28f * fade;
+    }
+    reveal = 1.0f - (1.0f - reveal) * (1.0f - reveal);
+
+    int scene_x = 64;
+    int scene_y = 65;
+    float level = clampf(pose->level, 0.0f, 1.0f);
+    if (mode == MUSE_MODE_LISTENING || mode == MUSE_MODE_SPEAKING) {
+        draw_side_waves(scene_x, scene_y - 15, pose->t, level);
+    } else {
+        draw_orbit(scene_x, scene_y, pose->t, mode, level);
+    }
+    draw_panda(pose, reveal, fade);
 }

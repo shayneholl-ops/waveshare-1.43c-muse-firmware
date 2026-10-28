@@ -41,8 +41,10 @@ extern "C" {
  * session task is the only task that touches the caller's MP3 buffer.
  *
  * muse_edge_tts_start() copies the text and returns false when it cannot
- * start (no usable clock, no memory, task spawn failed). The caller must
- * then fall back to silent caption pacing for that message.
+ * start (no memory or task spawn failure). The fetch task prefers SNTP for
+ * wall time; if SNTP is unavailable, it recovers clock skew from Edge's
+ * authenticated HTTP Date response and retries once. The caller falls back
+ * to silent caption pacing only when both attempts produce no audio.
  *
  * muse_edge_tts_pump() drains newly arrived MP3 bytes through on_mp3 and
  * reports completion, but ONLY once the stream buffer is fully drained:
